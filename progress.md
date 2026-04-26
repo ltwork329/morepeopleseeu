@@ -1,4 +1,4 @@
-# progress
+﻿# progress
 
 ## 2026-04-26
 - 已新增一键命令 `npm run materials:init`，自动创建三类素材文件夹并立即扫描。
