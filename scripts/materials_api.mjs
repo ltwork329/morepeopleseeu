@@ -15,6 +15,7 @@ const scanScript = path.join(root, 'scripts', 'scan_materials.mjs');
 const materialRoot = path.join(root, 'local_materials');
 const generatedAudioDir = path.join(root, 'public', 'generated_audio');
 const generatedVideoDir = path.join(root, 'public', 'generated_videos');
+const generatedSubtitleDir = path.join(root, 'public', 'generated_subtitles');
 const sourceBackupDir = path.join(materialRoot, 'source_backup');
 const bucketDirs = {
   unused: path.join(materialRoot, 'unused'),
@@ -43,6 +44,12 @@ function runNodeScript(scriptPath) {
       resolve(String(stdout || '').trim());
     });
   });
+}
+
+function openFolder(folderPath) {
+  if (process.platform === 'win32') {
+    execFile('explorer.exe', [folderPath], { windowsHide: true }, () => {});
+  }
 }
 
 function writeJson(res, status, payload) {
@@ -255,6 +262,16 @@ function languageBoostFrom(language) {
   return 'Chinese,Yue';
 }
 
+function containsCjk(text) {
+  return /[\u3400-\u9fff\uf900-\ufaff]/.test(String(text || ''));
+}
+
+function assertTextMatchesLanguage(text, language) {
+  if (language === 'english' && containsCjk(text)) {
+    throw new Error('English TTS requires English text. The current script contains Chinese characters.');
+  }
+}
+
 function decodeAudioPayload(audio) {
   if (!audio || typeof audio !== 'string') return null;
   if (/^[0-9a-fA-F]+$/.test(audio) && audio.length % 2 === 0) {
@@ -274,7 +291,33 @@ async function writeGeneratedAudio({ itemNumber, ext, bytes }) {
   const fileName = `${safeName}_${Date.now()}.${safeExt}`;
   const filePath = path.join(generatedAudioDir, fileName);
   await writeFile(filePath, bytes);
-  return `/generated_audio/${fileName}`;
+  return {
+    fileName,
+    url: `/generated_audio/${fileName}`,
+  };
+}
+
+async function writeGeneratedSubtitles({ audioFileName, chunks }) {
+  await mkdir(generatedSubtitleDir, { recursive: true });
+  const baseName = path.basename(audioFileName, path.extname(audioFileName));
+  const fileName = `${baseName}.json`;
+  const filePath = path.join(generatedSubtitleDir, fileName);
+  await writeFile(filePath, `${JSON.stringify({ chunks }, null, 2)}\n`, 'utf8');
+  return `/generated_subtitles/${fileName}`;
+}
+
+function safeFolderName(name, fallback = 'batch_videos') {
+  const text = String(name || '').trim() || fallback;
+  return text.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '_').slice(0, 80) || fallback;
+}
+
+function safeExportFileName({ itemNumber, title }) {
+  const safeItem = String(itemNumber || `video_${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '_');
+  const safeTitle = String(title || '')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/\s+/g, '_')
+    .slice(0, 40);
+  return `${safeItem}${safeTitle ? `_${safeTitle}` : ''}.mp4`;
 }
 
 function toSafeFileName(name, fallback = 'sample.bin') {
@@ -393,40 +436,71 @@ function extNameSafe(name, fallback = '.mp4') {
   return ext || fallback;
 }
 
-function buildSubtitleChunks(text, totalDuration) {
-  const raw = String(text || '').trim();
-  if (!raw) return [];
-  const pieces = raw
-    .split(/[。！？!?；;，,\n]/g)
-    .map((it) => it.trim())
-    .filter(Boolean);
-  const chunks = [];
-  const seed = pieces.length ? pieces : [raw];
-  for (const line of seed) {
-    if (line.length <= 10) {
-      chunks.push(line);
-      continue;
-    }
-    for (let i = 0; i < line.length; i += 10) {
-      chunks.push(line.slice(i, i + 10));
-    }
-  }
-  const duration = Math.max(1, Number(totalDuration) || 1);
-  const weights = chunks.map((line) => Math.max(2, line.length));
-  const weightSum = weights.reduce((acc, it) => acc + it, 0) || chunks.length;
-  const safeDuration = Math.max(0.8, duration - 0.08);
-  let cursor = 0;
-  return chunks.map((line, idx) => {
-    const rawDur = safeDuration * (weights[idx] / weightSum);
-    const segDur = Math.max(0.35, rawDur);
-    const start = cursor;
-    const end = idx === chunks.length - 1 ? safeDuration : Math.min(safeDuration, start + segDur);
-    cursor = end;
-    const wrapped = line.length > 8 ? `${line.slice(0, 8)}\n${line.slice(8, 16)}`.trim() : line;
-    return { line: wrapped, start, end };
-  });
+function secondsFromSubtitleValue(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  return number > 100 ? number / 1000 : number;
 }
 
+function textFromSubtitleEntry(entry) {
+  return String(entry?.text ?? entry?.subtitle ?? entry?.content ?? entry?.word ?? '').trim();
+}
+
+function timedChunkFromEntry(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  const line = textFromSubtitleEntry(entry);
+  if (!line) return null;
+  const start = secondsFromSubtitleValue(entry.start ?? entry.start_time ?? entry.begin_time ?? entry.begin);
+  const end = secondsFromSubtitleValue(entry.end ?? entry.end_time ?? entry.finish_time ?? entry.finish);
+  if (start === null || end === null || end <= start) return null;
+  const wrapped = line.length > 8 ? `${line.slice(0, 8)}\n${line.slice(8, 16)}`.trim() : line;
+  return { line: wrapped, start, end };
+}
+
+function collectTimedSubtitleChunks(payload) {
+  const chunks = [];
+  const visit = (value) => {
+    if (!value) return;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const chunk = timedChunkFromEntry(item);
+        if (chunk) chunks.push(chunk);
+        visit(item);
+      }
+      return;
+    }
+    if (typeof value === 'object') {
+      for (const item of Object.values(value)) {
+        visit(item);
+      }
+    }
+  };
+  visit(payload);
+  const unique = [];
+  const seen = new Set();
+  for (const chunk of chunks.sort((a, b) => a.start - b.start)) {
+    const key = `${chunk.start.toFixed(3)}:${chunk.end.toFixed(3)}:${chunk.line}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(chunk);
+  }
+  return unique;
+}
+
+async function loadGeneratedSubtitleChunks(audioUrl) {
+  const audioPath = resolvePublicFile(audioUrl, '/generated_audio/');
+  const audioFileName = path.basename(audioPath);
+  const subtitlePath = path.join(generatedSubtitleDir, `${path.basename(audioFileName, path.extname(audioFileName))}.json`);
+  if (!existsSync(subtitlePath)) {
+    throw new Error('missing real subtitle timestamps; regenerate audio first');
+  }
+  const payload = JSON.parse(await readFile(subtitlePath, 'utf8'));
+  const chunks = Array.isArray(payload?.chunks) ? payload.chunks.map(timedChunkFromEntry).filter(Boolean) : [];
+  if (!chunks.length) {
+    throw new Error('real subtitle timestamps are empty; regenerate audio first');
+  }
+  return chunks;
+}
 function createBucketFileName(baseName, suffix, ext) {
   const safeBase = String(baseName || 'material').replace(/[\\/:*?"<>|]/g, '_');
   return `${safeBase}_${suffix}_${Date.now()}${ext}`;
@@ -469,14 +543,18 @@ async function composeFinalVideo({
   subtitleStyle = {},
   titleHold = '8',
   audioUrl,
+  exportDir = '',
+  excludedMaterialBases = new Set(),
 }) {
   if (!ffmpegPath) throw new Error('ffmpeg not available');
   await runScan();
   const inventory = await loadInventory();
-  const source = inventory?.unused?.files?.[0];
+  const excludedBases = excludedMaterialBases instanceof Set ? excludedMaterialBases : new Set(excludedMaterialBases || []);
+  const source = (inventory?.unused?.files || []).find((file) => !excludedBases.has(normalizeMaterialBaseName(file.name)));
   if (!source?.name) throw new Error('no unused materials');
 
   const sourceVideoPath = path.join(bucketDirs.unused, source.name);
+  const sourceBase = normalizeMaterialBaseName(source.name);
   const audioPath = resolvePublicFile(audioUrl, '/generated_audio/');
   const audioDuration = await getMediaDurationSeconds(audioPath);
   const sourceDuration = Number(source.duration || 0) || await getMediaDurationSeconds(sourceVideoPath);
@@ -533,7 +611,7 @@ async function composeFinalVideo({
       textFilters.push(`drawtext=${titleArgs.join(':')}`);
     }
 
-    const subtitleChunks = buildSubtitleChunks(subtitleText, audioDuration);
+    const subtitleChunks = await loadGeneratedSubtitleChunks(audioUrl);
     for (let i = 0; i < subtitleChunks.length; i += 1) {
       const chunk = subtitleChunks[i];
       const chunkPath = path.join(textTempDir, `sub_${i}.txt`);
@@ -619,11 +697,20 @@ async function composeFinalVideo({
   await rm(sourceVideoPath, { force: true });
   await runScan();
 
+  let exportPath = '';
+  if (exportDir) {
+    await mkdir(exportDir, { recursive: true });
+    exportPath = path.join(exportDir, safeExportFileName({ itemNumber, title }));
+    await copyFile(outputPath, exportPath);
+  }
+
   return {
     videoUrl: `/generated_videos/${outputName}`,
     outputPath,
+    exportPath,
     usedMaterial: usedName,
     sourceMaterial: source.name,
+    sourceBase,
     duration: targetDuration,
     remainingDuration,
     remainderBucket,
@@ -697,6 +784,26 @@ const server = createServer(async (req, res) => {
     try {
       const output = await runScan();
       writeJson(res, 200, { ok: true, output });
+    } catch (error) {
+      writeJson(res, 500, { ok: false, error: error.message });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && parsedUrl.pathname === '/api/batch/folders') {
+    try {
+      const body = await readJsonBody(req);
+      const folderName = safeFolderName(body.folderName || `batch_${Date.now()}_videos`);
+      const exportDir = path.join(os.homedir(), 'Desktop', folderName);
+      await mkdir(bucketDirs.unused, { recursive: true });
+      await mkdir(exportDir, { recursive: true });
+      openFolder(bucketDirs.unused);
+      openFolder(exportDir);
+      writeJson(res, 200, {
+        ok: true,
+        materialDir: bucketDirs.unused,
+        exportDir,
+      });
     } catch (error) {
       writeJson(res, 500, { ok: false, error: error.message });
     }
@@ -839,6 +946,7 @@ const server = createServer(async (req, res) => {
       const itemNumber = String(body.itemNumber || `audio_${Date.now()}`);
       if (!text) throw new Error('text required');
       if (!voiceId) throw new Error('voiceId required');
+      assertTextMatchesLanguage(text, language);
 
       const ttsEndpoint = resolveMinimaxUrl(process.env.MINIMAX_TTS_ENDPOINT, '/v1/t2a_v2');
       const audioFormat = String(process.env.MINIMAX_AUDIO_FORMAT || 'mp3').trim() || 'mp3';
@@ -848,7 +956,9 @@ const server = createServer(async (req, res) => {
         text,
         stream: false,
         output_format: 'hex',
+        subtitle_enable: true,
         language_boost: languageBoostFrom(language),
+        english_normalization: language === 'english',
         voice_setting: {
           voice_id: voiceId,
           speed: 1,
@@ -894,18 +1004,29 @@ const server = createServer(async (req, res) => {
         throw new Error('tts success but no audio returned');
       }
 
-      const audioUrl = await writeGeneratedAudio({
+      const subtitleChunks = collectTimedSubtitleChunks(ttsResult);
+      if (!subtitleChunks.length) {
+        throw new Error('tts succeeded but no real subtitle timestamps returned');
+      }
+
+      const audioFile = await writeGeneratedAudio({
         itemNumber,
         ext: audioFormat,
         bytes: audioBytes,
       });
+      const subtitleUrl = await writeGeneratedSubtitles({
+        audioFileName: audioFile.fileName,
+        chunks: subtitleChunks,
+      });
 
       writeJson(res, 200, {
         ok: true,
-        audioUrl,
+        audioUrl: audioFile.url,
+        subtitleUrl,
         traceId: ttsResult.trace_id || '',
         source,
         voiceId,
+        subtitleCount: subtitleChunks.length,
       });
     } catch (error) {
       writeJson(res, 500, { ok: false, error: error.message });
@@ -926,6 +1047,52 @@ const server = createServer(async (req, res) => {
         audioUrl: String(body.audioUrl || ''),
       });
       writeJson(res, 200, { ok: true, ...result });
+    } catch (error) {
+      writeJson(res, 500, { ok: false, error: error.message });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && parsedUrl.pathname === '/api/compose/batch-render') {
+    try {
+      const body = await readJsonBody(req);
+      const tasks = Array.isArray(body.tasks) ? body.tasks : [];
+      if (!tasks.length) throw new Error('batch tasks required');
+      const folderName = safeFolderName(body.folderName || `batch_${Date.now()}`);
+      const exportDir = path.join(os.homedir(), 'Desktop', folderName);
+      const usedBases = new Set();
+      const results = [];
+      await runScan();
+      const inventory = await loadInventory();
+      const uniqueMaterialBases = new Set((inventory?.unused?.files || []).map((file) => normalizeMaterialBaseName(file.name)));
+      if (uniqueMaterialBases.size < tasks.length) {
+        throw new Error(`not enough unique unused materials: need ${tasks.length}, got ${uniqueMaterialBases.size}`);
+      }
+
+      for (const task of tasks) {
+        const result = await composeFinalVideo({
+          itemNumber: String(task.itemNumber || `video_${Date.now()}`),
+          title: String(task.title || ''),
+          subtitle: String(task.subtitle || ''),
+          titleStyle: task.titleStyle || {},
+          subtitleStyle: task.subtitleStyle || {},
+          titleHold: String(task.titleHold || '8'),
+          audioUrl: String(task.audioUrl || ''),
+          exportDir,
+          excludedMaterialBases: usedBases,
+        });
+        usedBases.add(result.sourceBase);
+        results.push({
+          taskId: String(task.id || ''),
+          ...result,
+        });
+      }
+
+      writeJson(res, 200, {
+        ok: true,
+        exportDir,
+        results,
+      });
     } catch (error) {
       writeJson(res, 500, { ok: false, error: error.message });
     }
