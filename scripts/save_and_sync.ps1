@@ -1,7 +1,9 @@
 param(
   [string]$Message = "",
   [int]$RetryCount = 4,
-  [int]$RetryDelaySeconds = 3
+  [int]$RetryDelaySeconds = 3,
+  [string]$Remote = "origin",
+  [string]$RemoteBranch = "autosave/main"
 )
 
 Set-StrictMode -Version Latest
@@ -30,15 +32,14 @@ function Invoke-WithRetry {
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
 
-$branch = (git branch --show-current).Trim()
-if (-not $branch) {
+$localBranch = (git branch --show-current).Trim()
+if (-not $localBranch) {
   throw "cannot detect current branch"
 }
 
-$remote = "origin"
-$remoteExists = git remote | Where-Object { $_.Trim() -eq $remote }
+$remoteExists = git remote | Where-Object { $_.Trim() -eq $Remote }
 if (-not $remoteExists) {
-  throw "remote '$remote' not found"
+  throw "remote '$Remote' not found"
 }
 
 $status = git status --porcelain
@@ -55,13 +56,9 @@ if ($hasChanges) {
   Write-Host "no local file changes, skip commit"
 }
 
-Invoke-WithRetry -Label "pull --rebase" -Action {
-  git pull --rebase $remote $branch
-}
-
 Invoke-WithRetry -Label "push" -Action {
-  git push $remote $branch
+  git push $Remote "HEAD:refs/heads/$RemoteBranch"
 }
 
 $head = (git rev-parse --short HEAD).Trim()
-Write-Host "sync done: $branch @ $head"
+Write-Host "sync done: local=$localBranch remote=$Remote/$RemoteBranch @ $head"
