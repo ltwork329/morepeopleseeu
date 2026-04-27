@@ -18,6 +18,7 @@ const initialState = {
   workMode: 'single',
   activeTaskId: null,
   defaultVoiceId: null,
+  batchExportFolderName: '',
   batchCount: 0,
   tasks: [],
   voices: [],
@@ -38,7 +39,7 @@ function loadState() {
   if (!raw) return initialState;
   try {
     const saved = { ...initialState, ...JSON.parse(raw) };
-    const allowedViews = new Set(['audio', 'compose', 'materials', 'logs']);
+    const allowedViews = new Set(['audio', 'batch', 'compose', 'materials', 'logs']);
     const activeView = allowedViews.has(saved.activeView) ? saved.activeView : 'audio';
     const workMode = saved.workMode === 'batch' ? 'batch' : 'single';
     const defaultVoiceId = saved.defaultVoiceId || null;
@@ -69,6 +70,7 @@ function normalizeTask(task, fallbackVoiceId = null) {
     outputPath: task.outputPath || '',
     titleHold: task.titleHold || '8',
     audioTraceId: task.audioTraceId || '',
+    subtitleConfirmed: Boolean(task.subtitleConfirmed),
     statusReason: task.statusReason || '',
   };
 }
@@ -202,6 +204,7 @@ function createTask({ batchId, index, title, body, language = 'yue' }) {
     outputPath: '',
     titleHold: '8',
     audioTraceId: '',
+    subtitleConfirmed: false,
   };
 }
 
@@ -399,6 +402,49 @@ async function importExcel(event) {
     activeView: 'audio',
   });
   addOperationLog('Excel导入', `导入 ${tasks.length} 条文案`);
+  event.target.value = '';
+}
+
+async function importBatchExcel(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+
+  const data = await file.arrayBuffer();
+  const workbook = XLSX.read(data, { type: 'array' });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+  const normalizedRows = rows.map((row) => ({
+    title: String(row.title || row.Title || row['标题'] || '').trim(),
+    body: String(row.body || row.content || row.text || row['文案'] || row['内容'] || '').trim(),
+    language: String(row.language || row.Language || row['语言'] || 'yue').trim() || 'yue',
+  }));
+  const validRows = normalizedRows.filter((row) => row.title && row.body);
+
+  if (!validRows.length) {
+    alert('Excel 需要两列：标题+文案（或 title+body），每行一条。');
+    return;
+  }
+
+  const batchId = createBatchId();
+  const tasks = validRows.map((row, index) =>
+    createTask({
+      batchId,
+      index: index + 1,
+      title: row.title,
+      body: row.body,
+      language: row.language || 'yue',
+    }),
+  );
+
+  setState({
+    batchCount: state.batchCount + 1,
+    tasks: [...tasks, ...state.tasks],
+    activeTaskId: tasks[0].id,
+    activeView: 'batch',
+    workMode: 'batch',
+    batchExportFolderName: `${batchId}_videos`,
+  });
+  addOperationLog('批量文案导入', `${batchId} / ${tasks.length} 条`);
   event.target.value = '';
 }
 
@@ -761,6 +807,106 @@ async function composeVideo(taskId) {
     addOperationLog('视频合成失败', `#${task.itemNumber} ${error.message}`, 'error');
   }
 }
+
+function getBatchTasks(batchId) {
+  return state.tasks.filter((task) => task.batchId === batchId);
+}
+
+function applyBatchVoice(batchId, voiceId) {
+  if (!batchId) return;
+  const tasks = state.tasks.map((task) =>
+    task.batchId === batchId
+      ? {
+          ...task,
+          selectedVoiceId: voiceId || task.selectedVoiceId,
+          updatedAt: new Date().toISOString(),
+        }
+      : task,
+  );
+  setState({ tasks, defaultVoiceId: voiceId || state.defaultVoiceId });
+  addOperationLog('批量选择声音', `${batchId} / ${getVoiceName(voiceId)}`);
+}
+
+function applyBatchLanguage(batchId, language) {
+  if (!batchId) return;
+  const tasks = state.tasks.map((task) =>
+    task.batchId === batchId
+      ? {
+          ...task,
+          language,
+          updatedAt: new Date().toISOString(),
+        }
+      : task,
+  );
+  setState({ tasks });
+  addOperationLog('批量选择语言', `${batchId} / ${languageName(language)}`);
+}
+
+function confirmBatchSubtitles(batchId) {
+  if (!batchId) return;
+  const tasks = state.tasks.map((task) =>
+    task.batchId === batchId
+      ? {
+          ...task,
+          subtitleConfirmed: true,
+          updatedAt: new Date().toISOString(),
+        }
+      : task,
+  );
+  setState({ tasks });
+  addOperationLog('批量字幕确认', `${batchId} 已确认`);
+}
+
+function applyStyleToBatch(batchId, sourceTaskId) {
+  if (!batchId || !sourceTaskId) return;
+  const source = state.tasks.find((task) => task.id === sourceTaskId);
+  if (!source) return;
+  const tasks = state.tasks.map((task) =>
+    task.batchId === batchId
+      ? {
+          ...task,
+          titleStyle: { ...source.titleStyle },
+          subtitleStyle: { ...source.subtitleStyle },
+          titleHold: source.titleHold,
+          updatedAt: new Date().toISOString(),
+        }
+      : task,
+  );
+  setState({ tasks });
+  addOperationLog('批量套用样式', `${batchId} 已套用`);
+}
+
+async function generateBatchAudio(batchId) {
+  const tasks = getBatchTasks(batchId);
+  for (const task of tasks) {
+    if (task.audioStatus === '已生成' && task.audioUrl) continue;
+    await generateAudio(task.id);
+  }
+}
+
+async function generateBatchVideos(batchId) {
+  const tasks = getBatchTasks(batchId);
+  for (const task of tasks) {
+    if (task.videoStatus === '已合成' && task.videoUrl) continue;
+    const latest = state.tasks.find((item) => item.id === task.id);
+    if (!latest?.audioUrl) continue;
+    await composeVideo(task.id);
+  }
+}
+
+async function startBatchAll(batchId) {
+  if (!batchId) return;
+  const batchTasks = getBatchTasks(batchId);
+  const unchecked = batchTasks.filter((task) => !task.subtitleConfirmed).length;
+  if (unchecked > 0) {
+    alert(`请先确认标题和字幕样式。还有 ${unchecked} 条未确认。`);
+    return;
+  }
+  addOperationLog('批量开始', `${batchId} 开始自动执行`);
+  await generateBatchAudio(batchId);
+  await generateBatchVideos(batchId);
+  addOperationLog('批量完成', `${batchId} 自动执行结束`);
+}
 function selectVoice(taskId, voiceId) {
   const tasks = state.tasks.map((task) =>
     task.id === taskId
@@ -924,6 +1070,7 @@ function render() {
           </div>
         </div>
         ${renderNav('audio', '音频工作台')}
+        ${renderNav('batch', '批量制作')}
         ${renderNav('compose', '视频合成')}
         ${renderNav('materials', '素材库')}
         ${renderNav('logs', '操作记录')}
@@ -944,6 +1091,7 @@ function render() {
         </header>
 
         ${state.activeView === 'audio' ? renderAudioWorkbench(activeTask) : ''}
+        ${state.activeView === 'batch' ? renderBatchWorkbench(activeTask) : ''}
         ${state.activeView === 'compose' ? renderCompose(activeTask) : ''}
         ${state.activeView === 'materials' ? renderMaterials() : ''}
         ${state.activeView === 'logs' ? renderLogsPage() : ''}
@@ -1113,6 +1261,85 @@ function renderTaskBoard(activeTask) {
         ${doneAudio.length ? renderRows(doneAudio) : renderEmpty('暂无已转音频文案')}
         <div class="task-group-title">未转音频</div>
         ${pendingAudio.length ? renderRows(pendingAudio) : renderEmpty('暂无未转音频文案')}
+      </div>
+    </section>
+  `;
+}
+
+function renderBatchWorkbench(activeTask) {
+  const batchIds = [...new Set(state.tasks.map((task) => task.batchId).filter(Boolean))];
+  const batchActiveTask = activeTask || (batchIds.length ? getBatchTasks(batchIds[0])[0] : null);
+  const activeBatchId = batchActiveTask?.batchId || batchIds[0] || '';
+  const batchTasks = getBatchTasks(activeBatchId);
+  const doneAudio = batchTasks.filter((task) => task.audioStatus === '已生成').length;
+  const doneVideo = batchTasks.filter((task) => task.videoStatus === '已合成').length;
+  const confirmedCount = batchTasks.filter((task) => task.subtitleConfirmed).length;
+  const voiceOptions = state.voices.map((voice) =>
+    `<option value="${voice.id}" ${batchActiveTask?.selectedVoiceId === voice.id ? 'selected' : ''}>${escapeHtml(voice.name)}</option>`,
+  ).join('');
+  const rows = batchTasks.map((task) => `
+    <button class="batch-simple-row ${activeTask?.id === task.id ? 'selected' : ''}" data-pick-task="${task.id}" data-pick-view="batch" type="button">
+      <span class="status ${statusClass(task.status)}">${task.status}</span>
+      <strong>#${task.itemNumber} ${escapeHtml(task.title)}</strong>
+      <span>音频：${task.audioStatus}</span>
+      <span>字幕：${task.subtitleConfirmed ? '已确认' : '待确认'}</span>
+      <span>视频：${task.videoStatus}</span>
+      <span class="batch-reason">${task.statusReason ? escapeHtml(task.statusReason) : '无异常'}</span>
+    </button>
+  `).join('');
+  return `
+    <section class="batch-shell">
+      <div class="panel batch-list-panel">
+        <p class="eyebrow">批量制作</p>
+        <h2>上传批量文案后，确认样式，一键自动跑完</h2>
+        <label class="upload-box">
+          <input id="batchExcelInput" type="file" accept=".xlsx,.xls,.csv" />
+          <span>上传批量文案 Excel</span>
+        </label>
+        ${batchIds.length ? `
+          <div class="batch-form-grid">
+            <label>选择批次
+              <select data-select-batch="true">
+                ${batchIds.map((batchId) => `<option value="${batchId}" ${batchId === activeBatchId ? 'selected' : ''}>${batchId}（${getBatchTasks(batchId).length}条）</option>`).join('')}
+              </select>
+            </label>
+            <label>批量声音
+              <select data-batch-voice="${activeBatchId}">
+                <option value="">默认声音</option>
+                ${voiceOptions}
+              </select>
+            </label>
+            <label>批量语言
+              <select data-batch-language="${activeBatchId}">
+                <option value="yue" ${batchActiveTask?.language === 'yue' ? 'selected' : ''}>粤语</option>
+                <option value="mandarin" ${batchActiveTask?.language === 'mandarin' ? 'selected' : ''}>普通话</option>
+                <option value="english" ${batchActiveTask?.language === 'english' ? 'selected' : ''}>英语</option>
+              </select>
+            </label>
+            <label>桌面文件夹名称
+              <input data-batch-folder type="text" value="${escapeHtml(state.batchExportFolderName || `${activeBatchId}_videos`)}" />
+            </label>
+          </div>
+          <div class="batch-stats">
+            <div><span>总数</span><strong>${batchTasks.length}</strong></div>
+            <div><span>音频</span><strong>${doneAudio}/${batchTasks.length}</strong></div>
+            <div><span>字幕确认</span><strong>${confirmedCount}/${batchTasks.length}</strong></div>
+            <div><span>导出</span><strong>${doneVideo}/${batchTasks.length}</strong></div>
+          </div>
+          <div class="material-actions">
+            <button class="soft" type="button" data-apply-batch-style="${activeBatchId}" data-style-source="${batchActiveTask?.id || ''}">套用当前标题/字幕样式</button>
+            <button class="soft" type="button" data-confirm-batch-subtitles="${activeBatchId}">确认标题和字幕样式</button>
+            <button class="primary" type="button" data-start-batch-all="${activeBatchId}">一键开始：生成音频并导出</button>
+          </div>
+          <div class="batch-simple-list">
+            ${rows || renderEmpty('当前批次没有文案')}
+          </div>
+        ` : renderEmpty('先上传批量文案 Excel')}
+      </div>
+      <div class="panel">
+        <p class="eyebrow">字幕和标题预览</p>
+        <h2>先点左侧任务，确认字幕位置和标题时长</h2>
+        ${batchActiveTask ? renderComposePreview(batchActiveTask) : renderEmpty('先导入批量文案')}
       </div>
     </section>
   `;
@@ -1704,8 +1931,37 @@ function bindEvents() {
   document.querySelector('[data-remove-failed-all]')?.addEventListener('click', removeFailedAll);
   document.querySelector('#pasteForm')?.addEventListener('submit', addPasteTask);
   document.querySelector('#excelInput')?.addEventListener('change', importExcel);
+  document.querySelector('#batchExcelInput')?.addEventListener('change', importBatchExcel);
   document.querySelectorAll('[data-work-mode]').forEach((button) => {
     button.addEventListener('click', () => setState({ workMode: button.dataset.workMode || 'single' }));
+  });
+  document.querySelector('[data-select-batch]')?.addEventListener('change', (event) => {
+    const firstTask = state.tasks.find((task) => task.batchId === event.currentTarget.value);
+    if (firstTask) selectTaskInView(firstTask.id, 'batch');
+  });
+  document.querySelectorAll('[data-batch-voice]').forEach((select) => {
+    select.addEventListener('change', () => applyBatchVoice(select.dataset.batchVoice, select.value));
+  });
+  document.querySelectorAll('[data-batch-language]').forEach((select) => {
+    select.addEventListener('change', () => applyBatchLanguage(select.dataset.batchLanguage, select.value));
+  });
+  document.querySelector('[data-batch-folder]')?.addEventListener('change', (event) => {
+    setState({ batchExportFolderName: event.currentTarget.value });
+  });
+  document.querySelectorAll('[data-apply-batch-style]').forEach((button) => {
+    button.addEventListener('click', () => applyStyleToBatch(button.dataset.applyBatchStyle, button.dataset.styleSource));
+  });
+  document.querySelectorAll('[data-confirm-batch-subtitles]').forEach((button) => {
+    button.addEventListener('click', () => confirmBatchSubtitles(button.dataset.confirmBatchSubtitles));
+  });
+  document.querySelectorAll('[data-start-batch-audio]').forEach((button) => {
+    button.addEventListener('click', () => generateBatchAudio(button.dataset.startBatchAudio));
+  });
+  document.querySelectorAll('[data-start-batch-video]').forEach((button) => {
+    button.addEventListener('click', () => generateBatchVideos(button.dataset.startBatchVideo));
+  });
+  document.querySelectorAll('[data-start-batch-all]').forEach((button) => {
+    button.addEventListener('click', () => startBatchAll(button.dataset.startBatchAll));
   });
   document.querySelector('#voiceForm')?.addEventListener('submit', addVoice);
   document.querySelectorAll('[data-delete-voice]').forEach((button) => {
