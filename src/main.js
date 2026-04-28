@@ -13,6 +13,14 @@ const pipelineSteps = [
   '导出最终视频',
 ];
 
+const defaultMaterialFolders = {
+  materialRoot: 'local_materials',
+  unusedDir: 'local_materials/unused',
+  fragmentsDir: 'local_materials/fragments',
+  usedDir: 'local_materials/used',
+  unifiedExportDir: 'Desktop/让更多人看到你_成片',
+};
+
 const initialState = {
   activeView: 'audio',
   workMode: 'single',
@@ -20,10 +28,13 @@ const initialState = {
   defaultVoiceId: null,
   batchExportFolderName: '',
   batchCount: 0,
+  batchProcessingBatchId: null,
   tasks: [],
   voices: [],
   operationLogs: [],
   previewVideoUrl: '',
+  noticeMessage: '',
+  materialFolders: defaultMaterialFolders,
   materialInventory: {
     unused: { count: 0, totalDuration: 0, files: [] },
     fragments: { count: 0, totalDuration: 0, files: [] },
@@ -49,6 +60,9 @@ function loadState() {
       workMode,
       tasks: saved.tasks.map((task) => normalizeTask(task, defaultVoiceId)),
       operationLogs: saved.operationLogs || [],
+      batchProcessingBatchId: saved.batchProcessingBatchId || null,
+      noticeMessage: '',
+      materialFolders: saved.materialFolders || defaultMaterialFolders,
       materialInventory: saved.materialInventory || initialState.materialInventory,
     };
   } catch {
@@ -60,8 +74,8 @@ function normalizeTask(task, fallbackVoiceId = null) {
   return {
     ...task,
     itemNumber: task.itemNumber || `${getTodayKey()}_0001`,
-    titleStyle: task.titleStyle || { size: 64, color: '#ffffff', x: 50, y: 18 },
-    subtitleStyle: task.subtitleStyle || { size: 42, color: '#ffffff', x: 50, y: 78 },
+    titleStyle: { width: 72, ...(task.titleStyle || { size: 64, color: '#ffffff', x: 50, y: 18 }) },
+    subtitleStyle: { width: 72, ...(task.subtitleStyle || { size: 42, color: '#ffffff', x: 50, y: 78 }) },
     selectedVoiceId: task.selectedVoiceId || fallbackVoiceId,
     composeHistory: task.composeHistory || [],
     materialFrameUrl: task.materialFrameUrl || null,
@@ -99,6 +113,10 @@ function setState(nextState) {
   render();
 }
 
+function notify(message) {
+  setState({ noticeMessage: String(message || '') });
+}
+
 async function loadMaterialInventory() {
   try {
     const response = await fetch(`/material_inventory.json?ts=${Date.now()}`);
@@ -122,9 +140,9 @@ async function initMaterialFoldersFromUi() {
       throw new Error(result.error || '初始化失败');
     }
     await loadMaterialInventory();
-    alert('已在本地完成文件夹创建和素材扫描。');
+    notify('已在本地完成文件夹创建和素材扫描。');
   } catch (error) {
-    alert(`初始化失败：${error.message}\n请确认开发服务使用 npm run dev 启动。`);
+    notify(`初始化失败：${error.message}\n请确认开发服务使用 npm run dev 启动。`);
   }
 }
 
@@ -144,7 +162,7 @@ async function scanMaterialsFromUi(options = {}) {
     return { ok: true };
   } catch (error) {
     if (!silent) {
-      alert(`扫描失败：${error.message}\n请确认开发服务使用 npm run dev 启动。`);
+      notify(`扫描失败：${error.message}\n请确认开发服务使用 npm run dev 启动。`);
     }
     return { ok: false, error: error.message };
   }
@@ -180,12 +198,14 @@ function createTask({ batchId, index, title, body, language = 'yue' }) {
       color: '#ffffff',
       x: 50,
       y: 18,
+      width: 72,
     },
     subtitleStyle: {
       size: 42,
       color: '#ffffff',
       x: 50,
       y: 78,
+      width: 72,
     },
     status: '待处理',
     stepIndex: 0,
@@ -253,7 +273,7 @@ async function grabMaterialFrame(taskId) {
         : task,
     );
     setState({ tasks: failedTasks });
-    alert(`没有抓取到首帧：${error.message}`);
+    notify(`没有抓取到首帧：${error.message}`);
   }
 }
 
@@ -342,7 +362,7 @@ function addPasteTask(event) {
   const title = String(form.get('title') || '');
   const body = String(form.get('body') || '');
   if (!title.trim() || !body.trim()) {
-    alert('每个视频都必须有标题和文案正文。');
+    notify('每个视频都必须有标题和文案正文。');
     return;
   }
 
@@ -380,7 +400,7 @@ async function importExcel(event) {
   const validRows = normalizedRows.filter((row) => row.title && row.body);
 
   if (!validRows.length) {
-    alert('Excel 需要两列：标题+文案（或 title+body），每行一条。');
+    notify('Excel 需要两列：标题+文案（或 title+body），每行一条。');
     return;
   }
 
@@ -421,7 +441,7 @@ async function importBatchExcel(event) {
   const validRows = normalizedRows.filter((row) => row.title && row.body);
 
   if (!validRows.length) {
-    alert('Excel 需要两列：标题+文案（或 title+body），每行一条。');
+    notify('Excel 需要两列：标题+文案（或 title+body），每行一条。');
     return;
   }
 
@@ -454,11 +474,11 @@ async function addVoice(event) {
   const name = String(form.get('voiceName') || '').trim();
   const sampleFile = form.get('voiceSample');
   if (!name) {
-    alert('请先给克隆声音起一个名字。');
+    notify('请先给克隆声音起一个名字。');
     return;
   }
   if (!(sampleFile instanceof File) || !sampleFile.size) {
-    alert('请上传声音样本（音频或视频）');
+    notify('请上传声音样本（音频或视频）');
     return;
   }
 
@@ -498,10 +518,10 @@ async function addVoice(event) {
     });
     addOperationLog('声音克隆成功', `${voice.name} / ${voice.id}`);
     event.currentTarget.reset();
-    alert('声音克隆成功');
+    notify('声音克隆成功');
   } catch (error) {
     addOperationLog('声音克隆失败', error.message, 'error');
-    alert(`声音克隆失败：${error.message}`);
+    notify(`声音克隆失败：${error.message}`);
   }
 }
 
@@ -536,7 +556,7 @@ async function deleteVoice(voiceId) {
       tasks,
     });
     addOperationLog('删除声音', `${voiceId} 已同步删除`);
-    alert('声音已删除，并已同步到 MiniMax');
+    notify('声音已删除，并已同步到 MiniMax');
   } catch (error) {
     addOperationLog('删除声音失败', `${voiceId} / ${error.message}`, 'error');
     if (confirm(`同步删除失败：${error.message}\n要只在本地移除这条声音吗？`)) {
@@ -551,7 +571,7 @@ async function deleteVoice(voiceId) {
       addOperationLog('本地移除声音', `${voiceId}（未同步 MiniMax）`, 'error');
       return;
     }
-    alert(`删除失败：${error.message}`);
+    notify(`删除失败：${error.message}`);
   }
 }
 
@@ -617,7 +637,7 @@ async function generateAudio(taskId) {
   if (!task) return;
   const voiceId = task.selectedVoiceId || state.defaultVoiceId;
   if (!voiceId) {
-    alert('请先在声音克隆页面完成克隆，再回来生成音频');
+    notify('请先在声音克隆页面完成克隆，再回来生成音频');
     return;
   }
 
@@ -730,7 +750,7 @@ async function composeVideo(taskId) {
   const task = state.tasks.find((item) => item.id === taskId);
   if (!task) return;
   if (!task.audioUrl) {
-    alert('请先生成音频，再一键合成视频。');
+    notify('请先生成音频，再一键合成视频。');
     return;
   }
 
@@ -876,10 +896,50 @@ function applyStyleToBatch(batchId, sourceTaskId) {
   addOperationLog('批量套用样式', `${batchId} 已套用`);
 }
 
-async function generateBatchAudio(batchId) {
+async function createBatchFolders(batchId) {
+  if (!batchId) return;
+  try {
+    const response = await fetch('http://127.0.0.1:3210/api/batch/folders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) {
+      throw new Error(result.error || '创建失败');
+    }
+    addOperationLog('批量文件夹创建', `${batchId} / ${result.exportDir}`);
+    notify(`已打开两个文件夹：\n素材：${result.materialDir}\n成片：${result.exportDir}`);
+  } catch (error) {
+    addOperationLog('批量文件夹创建失败', `${batchId} / ${error.message}`, 'error');
+    notify(`创建失败：${error.message}`);
+  }
+}
+
+async function loadMaterialFolders() {
+  try {
+    const response = await fetch('http://127.0.0.1:3210/api/materials/folders');
+    const result = await response.json();
+    if (!response.ok || !result.ok) return;
+    setState({
+      materialFolders: {
+        materialRoot: result.materialRoot || defaultMaterialFolders.materialRoot,
+        unusedDir: result.unusedDir || defaultMaterialFolders.unusedDir,
+        fragmentsDir: result.fragmentsDir || defaultMaterialFolders.fragmentsDir,
+        usedDir: result.usedDir || defaultMaterialFolders.usedDir,
+        unifiedExportDir: result.unifiedExportDir || defaultMaterialFolders.unifiedExportDir,
+      },
+    });
+  } catch {
+    // Keep default local folders when API is temporarily unavailable.
+  }
+}
+
+async function generateBatchAudio(batchId, options = {}) {
+  const { force = false } = options;
   const tasks = getBatchTasks(batchId);
   for (const task of tasks) {
-    if (task.audioStatus === '已生成' && task.audioUrl) continue;
+    if (!force && task.audioStatus === '已生成' && task.audioUrl) continue;
     await generateAudio(task.id);
   }
 }
@@ -894,18 +954,133 @@ async function generateBatchVideos(batchId) {
   }
 }
 
-async function startBatchAll(batchId) {
-  if (!batchId) return;
-  const batchTasks = getBatchTasks(batchId);
-  const unchecked = batchTasks.filter((task) => !task.subtitleConfirmed).length;
-  if (unchecked > 0) {
-    alert(`请先确认标题和字幕样式。还有 ${unchecked} 条未确认。`);
+async function runBatchRender(batchId, tasksToRender, runLabel = '批量合成') {
+  if (!tasksToRender.length) {
+    notify('没有可合成的任务。');
     return;
   }
+  const taskIds = new Set(tasksToRender.map((task) => task.id));
+  const runningTasks = state.tasks.map((task) =>
+    task.batchId === batchId && taskIds.has(task.id)
+      ? {
+          ...task,
+          status: '处理中',
+          videoStatus: '合成中',
+          statusReason: '',
+          message: '正在抓取素材并合成视频',
+          updatedAt: new Date().toISOString(),
+        }
+      : task,
+  );
+  setState({ tasks: runningTasks, batchProcessingBatchId: batchId });
+  try {
+    const payloadTasks = tasksToRender.map((task) => ({
+      id: task.id,
+      itemNumber: task.itemNumber,
+      title: task.title,
+      subtitle: String(task.body || '').trim() || '字幕预览文字',
+      titleStyle: task.titleStyle || {},
+      subtitleStyle: task.subtitleStyle || {},
+      titleHold: task.titleHold || '8',
+      audioUrl: String(task.audioUrl).split('?')[0],
+    }));
+    const response = await fetch('http://127.0.0.1:3210/api/compose/batch-render', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tasks: payloadTasks }),
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) {
+      throw new Error(result.error || '批量合成失败');
+    }
+    const mapById = new Map((result.results || []).map((item) => [String(item.taskId || item.id || ''), item]));
+    const nextTasks = state.tasks.map((task) => {
+      if (task.batchId !== batchId) return task;
+      const hit = mapById.get(task.id);
+      if (!hit) return task;
+      return {
+        ...task,
+        stepIndex: pipelineSteps.length - 1,
+        progress: 100,
+        status: '成功',
+        videoStatus: '已合成',
+        statusReason: '',
+        message: `已导出：${hit.videoUrl}`,
+        videoUrl: `${hit.videoUrl}?ts=${Date.now()}`,
+        outputPath: hit.outputPath || '',
+        materialFrame: hit.usedMaterial || task.materialFrame,
+        materialFrameUrl: hit.previewUrl ? `${hit.previewUrl}&t=${Date.now()}` : task.materialFrameUrl,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+    setState({ tasks: nextTasks, batchProcessingBatchId: null });
+    await scanMaterialsFromUi({ silent: true });
+    addOperationLog(runLabel, `${batchId} 共导出 ${(result.results || []).length} 条`);
+    const exportDir = result.exportDir || state.materialFolders?.unifiedExportDir || '';
+    notify(`${runLabel}完成：已导出 ${(result.results || []).length} 条\n导出目录：${exportDir}`);
+  } catch (error) {
+    const reason = error.message === 'Failed to fetch'
+      ? '合成服务连接中断：请点“继续合并（不重生音频）”，会直接复用已生成音频重新合成。'
+      : error.message;
+    const failedTasks = state.tasks.map((task) =>
+      task.batchId === batchId && tasksToRender.some((it) => it.id === task.id)
+        ? {
+            ...task,
+            status: task.status === '成功' ? task.status : '失败',
+            videoStatus: task.videoStatus === '已合成' ? task.videoStatus : '未合成',
+            statusReason: reason,
+            message: `批量合成失败：${reason}`,
+            updatedAt: new Date().toISOString(),
+          }
+        : task,
+    );
+    setState({ tasks: failedTasks, batchProcessingBatchId: null });
+    addOperationLog(`${runLabel}失败`, `${batchId} / ${reason}`, 'error');
+    notify(`批量合成失败：${reason}`);
+  }
+}
+
+async function startBatchAll(batchId) {
+  if (!batchId) return;
+  // One-click run auto-confirms style/subtitle state for the whole batch.
+  if (getBatchTasks(batchId).some((task) => !task.subtitleConfirmed)) {
+    const tasks = state.tasks.map((task) =>
+      task.batchId === batchId
+        ? {
+            ...task,
+            subtitleConfirmed: true,
+            updatedAt: new Date().toISOString(),
+          }
+        : task,
+    );
+    setState({ tasks });
+    addOperationLog('批量自动确认', `${batchId} 一键开始时自动确认样式`);
+  }
+  let batchTasks = getBatchTasks(batchId);
   addOperationLog('批量开始', `${batchId} 开始自动执行`);
-  await generateBatchAudio(batchId);
-  await generateBatchVideos(batchId);
-  addOperationLog('批量完成', `${batchId} 自动执行结束`);
+  await generateBatchAudio(batchId, { force: false });
+  batchTasks = getBatchTasks(batchId);
+  const pendingAudio = batchTasks.filter((task) => task.audioStatus !== '已生成' || !task.audioUrl);
+  if (pendingAudio.length) {
+    addOperationLog('批量终止', `${batchId} 仍有 ${pendingAudio.length} 条音频未生成`, 'error');
+    notify(`批量终止：还有 ${pendingAudio.length} 条音频未成功生成。`);
+    return;
+  }
+  await runBatchRender(batchId, batchTasks, '批量一键执行');
+}
+
+async function continueBatchCompose(batchId) {
+  if (!batchId) return;
+  const batchTasks = getBatchTasks(batchId);
+  const targets = batchTasks.filter(
+    (task) => task.audioStatus === '已生成' && task.audioUrl && task.videoStatus !== '已合成',
+  );
+  if (!targets.length) {
+    notify('没有可继续合并的任务（需已生成音频且未合成）。');
+    return;
+  }
+  addOperationLog('继续合并', `${batchId} 仅重试视频合成 ${targets.length} 条`);
+  await runBatchRender(batchId, targets, '继续合并');
 }
 function selectVoice(taskId, voiceId) {
   const tasks = state.tasks.map((task) =>
@@ -989,9 +1164,18 @@ function startDrag(event, taskId, target) {
   if (!board) return;
   let lastX = Number(element.dataset.x || 50);
   let lastY = Number(element.dataset.y || 50);
+  let lastWidth = Number(element.dataset.width || 72);
+  const mode = event.target?.dataset?.resizeEdge ? 'resize' : 'move';
   element.setPointerCapture?.(event.pointerId);
   const move = (moveEvent) => {
     const rect = board.getBoundingClientRect();
+    if (mode === 'resize') {
+      const pointerX = ((moveEvent.clientX - rect.left) / rect.width) * 100;
+      lastWidth = Math.round(Math.min(96, Math.max(24, Math.abs(pointerX - lastX) * 2)));
+      element.style.width = `${lastWidth}%`;
+      element.dataset.width = String(lastWidth);
+      return;
+    }
     const x = Math.min(95, Math.max(5, ((moveEvent.clientX - rect.left) / rect.width) * 100));
     const y = Math.min(95, Math.max(5, ((moveEvent.clientY - rect.top) / rect.height) * 100));
     lastX = Math.round(x);
@@ -1011,6 +1195,7 @@ function startDrag(event, taskId, target) {
           ...task[styleKey],
           x: lastX,
           y: lastY,
+          width: lastWidth,
         },
         updatedAt: new Date().toISOString(),
       };
@@ -1097,6 +1282,7 @@ function render() {
         ${state.activeView === 'logs' ? renderLogsPage() : ''}
       </main>
       ${renderVideoModal()}
+      ${renderNoticeModal()}
     </div>
   `;
   bindEvents();
@@ -1266,36 +1452,91 @@ function renderTaskBoard(activeTask) {
   `;
 }
 
+function renderNoticeModal() {
+  if (!state.noticeMessage) return '';
+  return `
+    <div class="video-modal" data-close-notice="true">
+      <div class="video-modal-card notice-modal-card" onclick="event.stopPropagation()">
+        <div class="panel-heading">
+          <h3>提示</h3>
+          <button class="danger" type="button" data-close-notice="true">关闭</button>
+        </div>
+        <pre class="notice-text">${escapeHtml(state.noticeMessage)}</pre>
+      </div>
+    </div>
+  `;
+}
+
 function renderBatchWorkbench(activeTask) {
   const batchIds = [...new Set(state.tasks.map((task) => task.batchId).filter(Boolean))];
-  const batchActiveTask = activeTask || (batchIds.length ? getBatchTasks(batchIds[0])[0] : null);
-  const activeBatchId = batchActiveTask?.batchId || batchIds[0] || '';
+  const activeBatchId = activeTask?.batchId || batchIds[0] || '';
   const batchTasks = getBatchTasks(activeBatchId);
+  const isBatchRunning = state.batchProcessingBatchId === activeBatchId;
+  const pendingBatchTasks = isBatchRunning ? [] : batchTasks.filter((task) => task.videoStatus !== '已合成');
+  const progressBatchTasks = batchTasks.filter((task) => task.videoStatus !== '已合成');
+  const completedBatchTasks = batchTasks.filter((task) => task.videoStatus === '已合成');
+  const batchActiveTask =
+    pendingBatchTasks.find((task) => task.id === activeTask?.id) ||
+    pendingBatchTasks[0] ||
+    null;
   const doneAudio = batchTasks.filter((task) => task.audioStatus === '已生成').length;
-  const doneVideo = batchTasks.filter((task) => task.videoStatus === '已合成').length;
+  const doneVideo = completedBatchTasks.length;
   const confirmedCount = batchTasks.filter((task) => task.subtitleConfirmed).length;
   const voiceOptions = state.voices.map((voice) =>
     `<option value="${voice.id}" ${batchActiveTask?.selectedVoiceId === voice.id ? 'selected' : ''}>${escapeHtml(voice.name)}</option>`,
   ).join('');
-  const rows = batchTasks.map((task) => `
-    <button class="batch-simple-row ${activeTask?.id === task.id ? 'selected' : ''}" data-pick-task="${task.id}" data-pick-view="batch" type="button">
+  const folders = state.materialFolders || defaultMaterialFolders;
+  const batchDocRows = isBatchRunning ? '' : pendingBatchTasks.map((task) => `
+    <tr>
+      <td>${escapeHtml(task.batchId || '')} / ${escapeHtml(task.itemNumber)}</td>
+      <td>${escapeHtml(task.title)}</td>
+      <td>${escapeHtml(task.body || '')}</td>
+    </tr>
+  `).join('');
+  const rows = progressBatchTasks.map((task) => `
+    <button class="batch-simple-row ${batchActiveTask?.id === task.id ? 'selected' : ''}" data-pick-task="${task.id}" data-pick-view="batch" type="button">
       <span class="status ${statusClass(task.status)}">${task.status}</span>
       <strong>#${task.itemNumber} ${escapeHtml(task.title)}</strong>
       <span>音频：${task.audioStatus}</span>
       <span>字幕：${task.subtitleConfirmed ? '已确认' : '待确认'}</span>
       <span>视频：${task.videoStatus}</span>
       <span class="batch-reason">${task.statusReason ? escapeHtml(task.statusReason) : '无异常'}</span>
+      <span class="batch-row-actions">
+        ${(task.audioStatus === '已生成' && task.videoStatus !== '已合成' && (String(task.status).includes('失败') || task.videoStatus === '未合成'))
+          ? `<button class="soft" type="button" data-stop-row="true" data-continue-batch-compose="${activeBatchId}">继续</button>`
+          : ''}
+      </span>
     </button>
   `).join('');
+  const historyRows = completedBatchTasks
+    .slice()
+    .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+    .map((task) => `<li>#${escapeHtml(task.itemNumber)} / ${escapeHtml(task.title)} / ${escapeHtml(task.status)} / ${formatTime(task.updatedAt)}</li>`)
+    .join('');
   return `
     <section class="batch-shell">
+      <div class="batch-left">
       <div class="panel batch-list-panel">
         <p class="eyebrow">批量制作</p>
         <h2>上传批量文案后，确认样式，一键自动跑完</h2>
-        <label class="upload-box">
-          <input id="batchExcelInput" type="file" accept=".xlsx,.xls,.csv" />
-          <span>上传批量文案 Excel</span>
-        </label>
+        <div class="batch-upload-row">
+          <label class="batch-upload-compact">
+            <input id="batchExcelInput" type="file" accept=".xlsx,.xls,.csv" />
+            <span>上传批量文案 Excel</span>
+          </label>
+          <p class="batch-upload-hint">上传后可在下方折叠区查看全部批次号、标题、文案。</p>
+        </div>
+        ${batchIds.length ? `
+          <details class="batch-docs-fold">
+            <summary>查看本批全部文案（默认折叠）</summary>
+            <div class="batch-docs-wrap">
+              <table class="batch-docs-table">
+                <thead><tr><th>批次编号</th><th>标题</th><th>文案</th></tr></thead>
+                <tbody>${batchDocRows || `<tr><td colspan="3">${isBatchRunning ? '批量正在执行，列表已清空等待结果...' : '当前批次没有待处理文案'}</td></tr>`}</tbody>
+              </table>
+            </div>
+          </details>
+        ` : ''}
         ${batchIds.length ? `
           <div class="batch-form-grid">
             <label>选择批次
@@ -1316,8 +1557,8 @@ function renderBatchWorkbench(activeTask) {
                 <option value="english" ${batchActiveTask?.language === 'english' ? 'selected' : ''}>英语</option>
               </select>
             </label>
-            <label>桌面文件夹名称
-              <input data-batch-folder type="text" value="${escapeHtml(state.batchExportFolderName || `${activeBatchId}_videos`)}" />
+            <label>统一导出文件夹（固定）
+              <input type="text" value="${escapeHtml(folders.unifiedExportDir || defaultMaterialFolders.unifiedExportDir)}" readonly />
             </label>
           </div>
           <div class="batch-stats">
@@ -1327,19 +1568,42 @@ function renderBatchWorkbench(activeTask) {
             <div><span>导出</span><strong>${doneVideo}/${batchTasks.length}</strong></div>
           </div>
           <div class="material-actions">
+            <button class="soft" type="button" data-create-batch-folders="${activeBatchId}">一键生成素材/成片文件夹</button>
+            <button class="soft" type="button" data-batch-grab-frame="${batchActiveTask?.id || ''}">抓取视频池预览</button>
             <button class="soft" type="button" data-apply-batch-style="${activeBatchId}" data-style-source="${batchActiveTask?.id || ''}">套用当前标题/字幕样式</button>
             <button class="soft" type="button" data-confirm-batch-subtitles="${activeBatchId}">确认标题和字幕样式</button>
+            <button class="soft" type="button" data-continue-batch-compose="${activeBatchId}">继续合并（不重生音频）</button>
             <button class="primary" type="button" data-start-batch-all="${activeBatchId}">一键开始：生成音频并导出</button>
           </div>
-          <div class="batch-simple-list">
-            ${rows || renderEmpty('当前批次没有文案')}
-          </div>
+          ${isBatchRunning ? '<p class="batch-running-tip">右侧正在合成中，请等待本轮结果。</p>' : ''}
         ` : renderEmpty('先上传批量文案 Excel')}
       </div>
-      <div class="panel">
+      <div class="panel batch-preview-panel">
         <p class="eyebrow">字幕和标题预览</p>
         <h2>先点左侧任务，确认字幕位置和标题时长</h2>
-        ${batchActiveTask ? renderComposePreview(batchActiveTask) : renderEmpty('先导入批量文案')}
+        ${batchActiveTask ? renderComposePreview(batchActiveTask) : renderEmpty(doneVideo ? '当前批次都已合成，请在过往记录查看。' : '先导入批量文案')}
+      </div>
+      </div>
+      <div class="panel batch-records-panel">
+        <p class="eyebrow">批量任务</p>
+        <h2>右侧看整体进度和失败原因</h2>
+        <div class="batch-simple-list">
+          ${rows || renderEmpty(doneVideo ? '当前批次都已合成，已移动到过往记录。' : '当前批次没有文案')}
+        </div>
+        <details class="batch-history-fold">
+          <summary>过往记录（默认折叠）</summary>
+          <ul class="batch-history-list">
+            ${historyRows || '<li>暂无已合成记录</li>'}
+          </ul>
+        </details>
+        <details class="batch-path-fold batch-path-tip-note">
+          <summary>路径说明（默认折叠，点击展开）</summary>
+          <div class="batch-path-tip">
+            <strong>视频素材放这里：</strong><code>${escapeHtml(folders.unusedDir)}</code>
+            <span>可复用残片在 <code>${escapeHtml(folders.fragmentsDir)}</code>，用过素材在 <code>${escapeHtml(folders.usedDir)}</code>。</span>
+            <span>所有成片统一导出到 <code>${escapeHtml(folders.unifiedExportDir || defaultMaterialFolders.unifiedExportDir)}</code>。</span>
+          </div>
+        </details>
       </div>
     </section>
   `;
@@ -1714,6 +1978,10 @@ function renderComposePreview(task) {
     `;
   }
 
+  const subtitleSource = previewSubtitleSample(task.body || '字幕预览文字');
+  const titleLayout = layoutPreviewOverlayText(task.title || '', task.titleStyle?.size, 'title', 2, task.titleStyle?.width);
+  const subtitleLayout = layoutPreviewOverlayText(subtitleSource, task.subtitleStyle?.size, 'subtitle', 1, task.subtitleStyle?.width);
+
   return `
     <div class="preview-workbench">
       <div class="compose-preview">
@@ -1724,22 +1992,25 @@ function renderComposePreview(task) {
           data-drag-task="${task.id}"
           data-x="${task.titleStyle.x}"
           data-y="${task.titleStyle.y}"
-          style="left:${task.titleStyle.x}%; top:${task.titleStyle.y}%; color:${task.titleStyle.color}; font-size:${task.titleStyle.size}px;"
-        >${escapeHtml(task.title)}</button>
+          data-width="${task.titleStyle.width || 72}"
+          style="left:${task.titleStyle.x}%; top:${task.titleStyle.y}%; width:${task.titleStyle.width || 72}%; color:${task.titleStyle.color}; font-size:${titleLayout.previewSize}px;"
+        ><span class="resize-handle left" data-resize-edge="left"></span><span class="preview-text">${escapeHtml(titleLayout.text)}</span><span class="resize-handle right" data-resize-edge="right"></span></button>
         <button
           class="preview-subtitle"
           data-drag-target="subtitle"
           data-drag-task="${task.id}"
           data-x="${task.subtitleStyle.x}"
           data-y="${task.subtitleStyle.y}"
-          style="left:${task.subtitleStyle.x}%; top:${task.subtitleStyle.y}%; color:${task.subtitleStyle.color}; font-size:${task.subtitleStyle.size}px;"
-        >${escapeHtml(String(task.body || '字幕预览文字').split(/[。！？!?]/)[0] || '字幕预览文字')}</button>
+          data-width="${task.subtitleStyle.width || 72}"
+          style="left:${task.subtitleStyle.x}%; top:${task.subtitleStyle.y}%; width:${task.subtitleStyle.width || 72}%; color:${task.subtitleStyle.color}; font-size:${subtitleLayout.previewSize}px;"
+        ><span class="resize-handle left" data-resize-edge="left"></span><span class="preview-text">${escapeHtml(subtitleLayout.text)}</span><span class="resize-handle right" data-resize-edge="right"></span></button>
       </div>
       <div>
         <div class="style-grid">
           ${renderStyleControl(task, 'title', '标题', task.titleStyle)}
           ${renderStyleControl(task, 'subtitle', '字幕', task.subtitleStyle)}
         </div>
+        ${titleLayout.truncated ? `<p class="hint log-error-text">提示：标题当前字号下已压到最多2行。</p>` : ''}
         <p class="hint">可拖动，也可用滑杆微调。</p>
       </div>
     </div>
@@ -1754,6 +2025,7 @@ function renderStyleControl(task, target, label, style) {
       <h3>${label}调整</h3>
       <label>颜色<input type="color" value="${style.color}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="color" /></label>
       <label>大小<input type="range" min="18" max="96" value="${style.size}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="size" /></label>
+      <label>边框宽度<input type="range" min="24" max="96" value="${style.width || 72}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="width" /></label>
       <label>左右位置<input type="range" min="5" max="95" value="${style.x}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="x" /></label>
       <label>上下位置<input type="range" min="5" max="95" value="${style.y}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="y" /></label>
       ${target === 'title' ? `
@@ -1897,6 +2169,9 @@ function bindEvents() {
   document.querySelectorAll('[data-close-preview]').forEach((button) => {
     button.addEventListener('click', () => setState({ previewVideoUrl: '' }));
   });
+  document.querySelectorAll('[data-close-notice]').forEach((button) => {
+    button.addEventListener('click', () => setState({ noticeMessage: '' }));
+  });
   document.querySelectorAll('[data-advance]').forEach((button) => {
     button.addEventListener('click', () => advanceTask(button.dataset.advance));
   });
@@ -1951,8 +2226,20 @@ function bindEvents() {
   document.querySelectorAll('[data-apply-batch-style]').forEach((button) => {
     button.addEventListener('click', () => applyStyleToBatch(button.dataset.applyBatchStyle, button.dataset.styleSource));
   });
+  document.querySelectorAll('[data-create-batch-folders]').forEach((button) => {
+    button.addEventListener('click', () => createBatchFolders(button.dataset.createBatchFolders));
+  });
+  document.querySelectorAll('[data-batch-grab-frame]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const taskId = button.dataset.batchGrabFrame;
+      if (taskId) grabMaterialFrame(taskId);
+    });
+  });
   document.querySelectorAll('[data-confirm-batch-subtitles]').forEach((button) => {
     button.addEventListener('click', () => confirmBatchSubtitles(button.dataset.confirmBatchSubtitles));
+  });
+  document.querySelectorAll('[data-continue-batch-compose]').forEach((button) => {
+    button.addEventListener('click', () => continueBatchCompose(button.dataset.continueBatchCompose));
   });
   document.querySelectorAll('[data-start-batch-audio]').forEach((button) => {
     button.addEventListener('click', () => generateBatchAudio(button.dataset.startBatchAudio));
@@ -2007,6 +2294,119 @@ function languageName(language) {
   return '粤语';
 }
 
+function normalizeOverlayText(input) {
+  return String(input || '').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function splitCueText(input, maxChars = 12) {
+  const text = normalizeOverlayText(input);
+  if (!text) return [];
+  const pieces = text
+    .split(/(?<=[。！？!?；;，,、])/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const output = [];
+  for (const piece of pieces.length ? pieces : [text]) {
+    const chars = [...piece];
+    if (chars.length <= maxChars) {
+      output.push(piece);
+      continue;
+    }
+    for (let cursor = 0; cursor < chars.length; cursor += maxChars) {
+      output.push(chars.slice(cursor, cursor + maxChars).join('').trim());
+    }
+  }
+  return output.filter(Boolean);
+}
+
+function previewSubtitleSample(input) {
+  const text = normalizeOverlayText(input);
+  if (!text) return '字幕预览文字';
+  return splitCueText(text, 12)[0] || text.slice(0, 12);
+}
+
+function outputFontSizeFromStyle(sourceSize, target = 'subtitle') {
+  const size = Number(sourceSize || (target === 'title' ? 64 : 42));
+  const outputBase = Math.round(size * (1080 / 640));
+  return target === 'title'
+    ? Math.min(112, Math.max(26, outputBase))
+    : Math.min(84, Math.max(24, outputBase));
+}
+
+function estimateColsForOverlay(text, outputSize, target = 'subtitle', widthPct = null) {
+  const cleaned = normalizeOverlayText(text);
+  if (!cleaned) return 1;
+  const styleWidth = Number(widthPct);
+  const maxWidthRatio = Number.isFinite(styleWidth)
+    ? Math.max(0.24, Math.min(0.96, styleWidth / 100))
+    : (target === 'title' ? 0.84 : 0.9);
+  const safeRatio = target === 'title' ? 0.64 : 0.58;
+  const maxWidthPx = 1080 * maxWidthRatio * safeRatio;
+  const cjkCount = (cleaned.match(/[\u3400-\u9fff\uf900-\ufaff]/g) || []).length;
+  const latinCount = Math.max(0, [...cleaned].length - cjkCount);
+  const cjkWeight = cjkCount + latinCount * 0.62;
+  const avgCharWidth = cjkWeight > 0 ? (cjkCount * 1 + latinCount * 0.62) / cjkWeight : 1;
+  const unitPx = outputSize * avgCharWidth;
+  const cols = Math.floor(maxWidthPx / Math.max(1, unitPx));
+  return Math.max(target === 'title' ? 6 : 8, cols);
+}
+
+function fitTitleOutputSize(text, sourceSize, widthPct = null) {
+  let outputSize = outputFontSizeFromStyle(sourceSize, 'title');
+  const total = [...normalizeOverlayText(text)].length;
+  while (outputSize > 26 && estimateColsForOverlay(text, outputSize, 'title', widthPct) * 2 < total) {
+    outputSize -= 2;
+  }
+  return outputSize;
+}
+
+function wrapOverlayLikeOutput(input, sourceSize, target = 'subtitle', maxLines = target === 'subtitle' ? 1 : 2, widthPct = null) {
+  const text = normalizeOverlayText(input);
+  if (!text) return { text: '', truncated: false, outputSize: outputFontSizeFromStyle(sourceSize, target) };
+  const outputSize = target === 'title'
+    ? fitTitleOutputSize(text, sourceSize, widthPct)
+    : outputFontSizeFromStyle(sourceSize, target);
+  const maxCols = estimateColsForOverlay(text, outputSize, target, widthPct);
+  const chars = [...text];
+  const lines = [];
+  let current = '';
+  let truncated = false;
+  let usedChars = 0;
+  for (const ch of chars) {
+    current += ch;
+    usedChars += 1;
+    if ([...current].length >= maxCols) {
+      if (lines.length < maxLines - 1) {
+        lines.push(current.trim());
+        current = '';
+      } else {
+        lines.push(current.trim());
+        truncated = usedChars < chars.length;
+        current = '';
+        break;
+      }
+    }
+  }
+  if (current && lines.length < maxLines) lines.push(current.trim());
+  if (!lines.length) lines.push(text);
+  let output = lines.slice(0, maxLines).join('\n');
+  if (truncated && output.length > 1 && target !== 'title') output = `${output.slice(0, -1)}…`;
+  if (truncated && target === 'title') {
+    output = lines.concat(current ? [current.trim()] : []).join('\n');
+  }
+  return { text: output, truncated, outputSize };
+}
+
+function layoutPreviewOverlayText(input, sourceSize, target = 'subtitle', maxLines = target === 'subtitle' ? 1 : 2, widthPct = null) {
+  const wrapped = wrapOverlayLikeOutput(input, sourceSize, target, maxLines, widthPct);
+  const previewSize = Math.max(14, Math.round((wrapped.outputSize * 360) / 1080));
+  return {
+    text: wrapped.text,
+    truncated: wrapped.truncated,
+    previewSize,
+  };
+}
+
 function getVoiceName(voiceId) {
   const voice = state.voices.find((item) => item.id === voiceId) || state.voices.find((item) => item.id === state.defaultVoiceId);
   return voice ? voice.name : '默认声音未设置';
@@ -2023,6 +2423,8 @@ function escapeHtml(value) {
 
 render();
 loadMaterialInventory();
+loadMaterialFolders();
+
 
 
 

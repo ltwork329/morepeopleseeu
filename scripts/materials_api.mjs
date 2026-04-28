@@ -25,6 +25,11 @@ const bucketDirs = {
 
 const host = '127.0.0.1';
 const port = 3210;
+const unifiedExportDir = path.join(
+  os.homedir(),
+  'Desktop',
+  safeFolderName(process.env.UNIFIED_EXPORT_DIR_NAME || '让更多人看到你_成片', '让更多人看到你_成片'),
+);
 
 function runInit() {
   return runNodeScript(initScript);
@@ -293,6 +298,7 @@ async function writeGeneratedAudio({ itemNumber, ext, bytes }) {
   await writeFile(filePath, bytes);
   return {
     fileName,
+    filePath,
     url: `/generated_audio/${fileName}`,
   };
 }
@@ -431,12 +437,186 @@ async function getMediaDurationSeconds(filePath) {
   return seconds;
 }
 
+function parseSilenceEvents(stderrText) {
+  const events = [];
+  const text = String(stderrText || '');
+  const startRegex = /silence_start:\s*([0-9]+(?:\.[0-9]+)?)/g;
+  const endRegex = /silence_end:\s*([0-9]+(?:\.[0-9]+)?)/g;
+  let m = null;
+  while ((m = startRegex.exec(text)) !== null) {
+    const t = Number(m[1]);
+    if (Number.isFinite(t)) events.push({ type: 'start', time: t });
+  }
+  while ((m = endRegex.exec(text)) !== null) {
+    const t = Number(m[1]);
+    if (Number.isFinite(t)) events.push({ type: 'end', time: t });
+  }
+  return events.sort((a, b) => a.time - b.time);
+}
+
+function normalizeOverlayText(input) {
+  return String(input || '').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function textUnits(value) {
+  return Math.max(1, normalizeOverlayText(value).replace(/\s+/g, '').length);
+}
+
+function splitCueText(input, maxChars = 12) {
+  const text = normalizeOverlayText(input);
+  if (!text) return [];
+  const pieces = text
+    .split(/(?<=[。！？；，、,.!?;])/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const output = [];
+  for (const piece of pieces.length ? pieces : [text]) {
+    const chars = [...piece];
+    if (chars.length <= maxChars) {
+      output.push(piece);
+      continue;
+    }
+    for (let cursor = 0; cursor < chars.length; cursor += maxChars) {
+      output.push(chars.slice(cursor, cursor + maxChars).join('').trim());
+    }
+  }
+  return output.filter(Boolean);
+}
+
+function expandSubtitleChunk(chunk, maxChars = 12) {
+  const startBase = Math.max(0, Number(chunk?.start || 0));
+  const endBase = Math.max(startBase + 0.2, Number(chunk?.end || 0));
+  const parts = splitCueText(chunk?.line || '', maxChars);
+  if (!parts.length) return [];
+  if (parts.length === 1) return [{ line: parts[0], start: startBase, end: endBase }];
+
+  const totalUnits = parts.reduce((sum, part) => sum + textUnits(part), 0) || parts.length;
+  const duration = Math.max(0.2, endBase - startBase);
+  const expanded = [];
+  let cursor = startBase;
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    const end = index === parts.length - 1
+      ? endBase
+      : Math.min(endBase, cursor + Math.max(0.18, duration * (textUnits(part) / totalUnits)));
+    expanded.push({
+      line: part,
+      start: cursor,
+      end: Math.max(cursor + 0.12, end),
+    });
+    cursor = Math.max(cursor + 0.12, end);
+    if (cursor >= endBase) break;
+  }
+  return expanded;
+}
+
+function estimateColsForOverlay(text, outputSize, target = 'subtitle', widthPct = null) {
+  const cleaned = normalizeOverlayText(text);
+  if (!cleaned) return 1;
+  const styleWidth = Number(widthPct);
+  const maxWidthRatio = Number.isFinite(styleWidth)
+    ? Math.max(0.24, Math.min(0.96, styleWidth / 100))
+    : (target === 'title' ? 0.84 : 0.9);
+  const safeRatio = target === 'title' ? 0.64 : 0.58;
+  const maxWidthPx = 1080 * maxWidthRatio * safeRatio;
+  const cjkCount = (cleaned.match(/[\u3400-\u9fff\uf900-\ufaff]/g) || []).length;
+  const latinCount = Math.max(0, [...cleaned].length - cjkCount);
+  const weighted = cjkCount + latinCount * 0.62;
+  const avgCharWidth = weighted > 0 ? (cjkCount * 1 + latinCount * 0.62) / weighted : 1;
+  const unitPx = outputSize * avgCharWidth;
+  const cols = Math.floor(maxWidthPx / Math.max(1, unitPx));
+  return Math.max(target === 'title' ? 6 : 8, cols);
+}
+
+function fitTitleOutputSize(text, outputSize, widthPct = null) {
+  const total = [...normalizeOverlayText(text)].length;
+  let size = outputSize;
+  while (size > 26 && estimateColsForOverlay(text, size, 'title', widthPct) * 2 < total) {
+    size -= 2;
+  }
+  return size;
+}
+
+function wrapOverlayForStyle(input, {
+  target = 'subtitle',
+  outputSize = 48,
+  maxLines = target === 'subtitle' ? 1 : 2,
+  widthPct = null,
+} = {}) {
+  const text = normalizeOverlayText(input);
+  if (!text) return '';
+  const fittedSize = target === 'title' ? fitTitleOutputSize(text, outputSize, widthPct) : outputSize;
+  const maxCols = estimateColsForOverlay(text, fittedSize, target, widthPct);
+  const chars = [...text];
+  const lines = [];
+  let current = '';
+  let index = 0;
+  for (const ch of chars) {
+    index += 1;
+    current += ch;
+    if ([...current].length >= maxCols) {
+      lines.push(current.trim());
+      current = '';
+      if (lines.length >= maxLines) break;
+    }
+  }
+  if (current && lines.length < maxLines) lines.push(current.trim());
+  if (!lines.length) return text;
+  let output = lines.slice(0, maxLines).join('\n').trim();
+  if (index < chars.length && output.length > 1) {
+    output = target === 'subtitle' ? output : output;
+  }
+  return output || text;
+}
+
+async function detectSpeechWindow(filePath, durationSec) {
+  if (!ffmpegPath) return { start: 0, end: durationSec };
+  const total = Number(durationSec);
+  if (!Number.isFinite(total) || total <= 0.2) return { start: 0, end: 0 };
+  const probe = await runExecCapture(ffmpegPath, [
+    '-hide_banner',
+    '-i',
+    filePath,
+    '-af',
+    'silencedetect=noise=-34dB:d=0.22',
+    '-f',
+    'null',
+    '-',
+  ]);
+  const events = parseSilenceEvents(probe.stderr);
+  let speechStart = 0;
+  let speechEnd = total;
+  const firstStart = events.find((it) => it.type === 'start');
+  const firstEnd = events.find((it) => it.type === 'end');
+  if (firstStart && firstEnd && firstStart.time <= 0.08 && firstEnd.time > firstStart.time) {
+    speechStart = Math.max(0, Math.min(total - 0.2, firstEnd.time));
+  }
+  speechEnd = total;
+  if (speechEnd - speechStart < 0.8) {
+    return { start: 0, end: total };
+  }
+  return { start: speechStart, end: speechEnd };
+}
+
 function extNameSafe(name, fallback = '.mp4') {
   const ext = path.extname(String(name || '')).toLowerCase();
   return ext || fallback;
 }
 
 function secondsFromSubtitleValue(value) {
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text) return null;
+    const hhmmss = /^(\d{1,2}):(\d{1,2}):(\d{1,2})(?:[.,](\d{1,3}))?$/.exec(text);
+    if (hhmmss) {
+      const h = Number(hhmmss[1]);
+      const m = Number(hhmmss[2]);
+      const s = Number(hhmmss[3]);
+      const msRaw = hhmmss[4] || '0';
+      const ms = Number(msRaw.padEnd(3, '0').slice(0, 3));
+      return h * 3600 + m * 60 + s + ms / 1000;
+    }
+  }
   const number = Number(value);
   if (!Number.isFinite(number)) return null;
   return number > 100 ? number / 1000 : number;
@@ -447,14 +627,39 @@ function textFromSubtitleEntry(entry) {
 }
 
 function timedChunkFromEntry(entry) {
-  if (!entry || typeof entry !== 'object') return null;
+  if (!entry) return null;
+  if (Array.isArray(entry) && entry.length >= 3) {
+    const line = String(entry[0] ?? '').trim();
+    const start = secondsFromSubtitleValue(entry[1]);
+    const end = secondsFromSubtitleValue(entry[2]);
+    if (!line || start === null || end === null || end <= start) return null;
+    return { line: normalizeOverlayText(line), start, end };
+  }
+  if (typeof entry !== 'object') return null;
   const line = textFromSubtitleEntry(entry);
   if (!line) return null;
-  const start = secondsFromSubtitleValue(entry.start ?? entry.start_time ?? entry.begin_time ?? entry.begin);
-  const end = secondsFromSubtitleValue(entry.end ?? entry.end_time ?? entry.finish_time ?? entry.finish);
+  const start = secondsFromSubtitleValue(
+    entry.start
+    ?? entry.start_time
+    ?? entry.begin_time
+    ?? entry.begin
+    ?? entry.startTime
+    ?? entry.offset
+    ?? entry.from
+    ?? entry.ts_start,
+  );
+  const end = secondsFromSubtitleValue(
+    entry.end
+    ?? entry.end_time
+    ?? entry.finish_time
+    ?? entry.finish
+    ?? entry.endTime
+    ?? entry.to
+    ?? entry.ts_end
+    ?? (start !== null ? start + Number(entry.duration || entry.len || 0) : null),
+  );
   if (start === null || end === null || end <= start) return null;
-  const wrapped = line.length > 8 ? `${line.slice(0, 8)}\n${line.slice(8, 16)}`.trim() : line;
-  return { line: wrapped, start, end };
+  return { line: normalizeOverlayText(line), start, end };
 }
 
 function collectTimedSubtitleChunks(payload) {
@@ -487,19 +692,97 @@ function collectTimedSubtitleChunks(payload) {
   return unique;
 }
 
-async function loadGeneratedSubtitleChunks(audioUrl) {
+function splitSubtitleSentences(text) {
+  const parts = String(text || '')
+    .replace(/\r/g, '\n')
+    .split(/[\n，。！？；、,.!?;]+/)
+    .map((it) => it.trim())
+    .filter(Boolean);
+  if (parts.length) return parts;
+  return [String(text || '').trim()].filter(Boolean);
+}
+
+function buildFallbackTimedChunks(text, durationSec, speechWindow = null) {
+  const total = Number(durationSec);
+  if (!Number.isFinite(total) || total <= 0.2) return [];
+  const lines = splitSubtitleSentences(text)
+    .flatMap((line) => splitCueText(line, 12))
+    .slice(0, 240);
+  if (!lines.length) return [];
+  const startBase = Number(speechWindow?.start);
+  const endBase = Number(speechWindow?.end);
+  const windowStart = Number.isFinite(startBase) ? Math.max(0, Math.min(total - 0.2, startBase)) : 0;
+  const windowEnd = Number.isFinite(endBase) ? Math.max(windowStart + 0.2, Math.min(total, endBase)) : total;
+  const activeDuration = Math.max(0.4, windowEnd - windowStart);
+  const weights = lines.map((line) => {
+    const compact = String(line).replace(/\s+/g, '');
+    return Math.max(2, compact.length);
+  });
+  const totalWeight = weights.reduce((sum, w) => sum + w, 0) || lines.length;
+  const chunks = [];
+  let cursor = windowStart;
+  for (let i = 0; i < lines.length; i += 1) {
+    const ratio = weights[i] / totalWeight;
+    const alloc = Math.max(0.22, activeDuration * ratio);
+    const start = Math.max(0, cursor);
+    const end = i === lines.length - 1
+      ? windowEnd
+      : Math.max(start + 0.18, Math.min(windowEnd, cursor + alloc));
+    const line = normalizeOverlayText(lines[i]);
+    chunks.push({ line, start, end });
+    cursor = end;
+  }
+  return chunks;
+}
+
+function normalizeTimelineChunks(chunks, durationSec) {
+  const total = Number(durationSec);
+  const baseList = Array.isArray(chunks)
+    ? chunks
+      .map((it) => ({
+        line: normalizeOverlayText(it?.line || ''),
+        start: Math.max(0, Number(it?.start || 0)),
+        end: Math.max(0, Number(it?.end || 0)),
+      }))
+      .filter((it) => it.line && Number.isFinite(it.start) && Number.isFinite(it.end) && it.end > it.start)
+    : [];
+  const list = baseList.flatMap((chunk) => expandSubtitleChunk(chunk, 12));
+  if (!list.length) return [];
+  const sorted = list.sort((a, b) => a.start - b.start);
+  if (Number.isFinite(total) && total > 0.2) {
+    for (const item of sorted) {
+      item.start = Math.min(total, item.start);
+      item.end = Math.min(total, item.end);
+      if (item.end <= item.start) item.end = Math.min(total, item.start + 0.2);
+    }
+  }
+  return sorted.filter((it) => it.end > it.start);
+}
+
+function timelineCoverageRatio(chunks, durationSec) {
+  const total = Number(durationSec);
+  if (!Number.isFinite(total) || total <= 0.2 || !Array.isArray(chunks) || !chunks.length) return 0;
+  const lastEnd = chunks[chunks.length - 1].end || 0;
+  return Math.max(0, Math.min(1, lastEnd / total));
+}
+
+async function loadGeneratedSubtitleChunks(audioUrl, fallbackText = '') {
   const audioPath = resolvePublicFile(audioUrl, '/generated_audio/');
   const audioFileName = path.basename(audioPath);
   const subtitlePath = path.join(generatedSubtitleDir, `${path.basename(audioFileName, path.extname(audioFileName))}.json`);
-  if (!existsSync(subtitlePath)) {
-    throw new Error('missing real subtitle timestamps; regenerate audio first');
+  const durationSec = await getMediaDurationSeconds(audioPath).catch(() => 0);
+  if (existsSync(subtitlePath)) {
+    const payload = JSON.parse(await readFile(subtitlePath, 'utf8'));
+    const chunks = normalizeTimelineChunks(
+      Array.isArray(payload?.chunks) ? payload.chunks.map(timedChunkFromEntry).filter(Boolean) : [],
+      durationSec,
+    );
+    if (chunks.length && timelineCoverageRatio(chunks, durationSec) >= 0.82) return chunks;
   }
-  const payload = JSON.parse(await readFile(subtitlePath, 'utf8'));
-  const chunks = Array.isArray(payload?.chunks) ? payload.chunks.map(timedChunkFromEntry).filter(Boolean) : [];
-  if (!chunks.length) {
-    throw new Error('real subtitle timestamps are empty; regenerate audio first');
-  }
-  return chunks;
+  const speechWindow = await detectSpeechWindow(audioPath, durationSec).catch(() => ({ start: 0, end: durationSec }));
+  const fallback = buildFallbackTimedChunks(fallbackText, durationSec, speechWindow);
+  if (fallback.length) return fallback;
+  throw new Error('subtitle timeline unavailable; regenerate audio');
 }
 function createBucketFileName(baseName, suffix, ext) {
   const safeBase = String(baseName || 'material').replace(/[\\/:*?"<>|]/g, '_');
@@ -544,21 +827,43 @@ async function composeFinalVideo({
   titleHold = '8',
   audioUrl,
   exportDir = '',
-  excludedMaterialBases = new Set(),
+  excludedMaterialNames = new Set(),
 }) {
   if (!ffmpegPath) throw new Error('ffmpeg not available');
   await runScan();
   const inventory = await loadInventory();
-  const excludedBases = excludedMaterialBases instanceof Set ? excludedMaterialBases : new Set(excludedMaterialBases || []);
-  const source = (inventory?.unused?.files || []).find((file) => !excludedBases.has(normalizeMaterialBaseName(file.name)));
-  if (!source?.name) throw new Error('no unused materials');
-
-  const sourceVideoPath = path.join(bucketDirs.unused, source.name);
-  const sourceBase = normalizeMaterialBaseName(source.name);
+  const excludedNames = excludedMaterialNames instanceof Set ? excludedMaterialNames : new Set(excludedMaterialNames || []);
   const audioPath = resolvePublicFile(audioUrl, '/generated_audio/');
   const audioDuration = await getMediaDurationSeconds(audioPath);
-  const sourceDuration = Number(source.duration || 0) || await getMediaDurationSeconds(sourceVideoPath);
-  const targetDuration = Math.max(2, Math.min(audioDuration + 1, sourceDuration));
+  const sourcePool = [...(inventory?.unused?.files || []), ...(inventory?.fragments?.files || [])]
+    .filter((file) => !excludedNames.has(file.name));
+  const candidates = [];
+  for (const file of sourcePool) {
+    const sourceDir = [bucketDirs.unused, bucketDirs.fragments, bucketDirs.used]
+      .find((dir) => existsSync(path.join(dir, file.name)));
+    if (!sourceDir) continue;
+    const sourcePath = path.join(sourceDir, file.name);
+    let duration = Number(file.duration || 0);
+    if (!Number.isFinite(duration) || duration <= 0) {
+      duration = await getMediaDurationSeconds(sourcePath).catch(() => 0);
+    }
+    if (!Number.isFinite(duration) || duration <= 0.2) continue;
+    candidates.push({ ...file, sourceDir, sourcePath, duration });
+  }
+  if (!candidates.length) throw new Error('no usable materials');
+  const minNeededDuration = Math.max(2, audioDuration + 0.2);
+  const preferred = candidates
+    .filter((it) => it.duration >= minNeededDuration)
+    .sort((a, b) => a.duration - b.duration);
+  if (!preferred.length) {
+    const maxDuration = Math.max(...candidates.map((it) => it.duration));
+    throw new Error(`绱犳潗鏃堕暱涓嶈冻锛氶煶棰?${audioDuration.toFixed(2)}s锛屽彲鐢ㄧ礌鏉愭渶闀?${maxDuration.toFixed(2)}s`);
+  }
+  const source = preferred[0];
+  const sourceVideoPath = source.sourcePath;
+  const sourceDuration = source.duration;
+  const sourceBase = normalizeMaterialBaseName(source.name);
+  const targetDuration = Math.max(2, Math.min(audioDuration + 0.2, sourceDuration));
   const remainingDuration = Math.max(0, sourceDuration - targetDuration);
 
   await mkdir(generatedVideoDir, { recursive: true });
@@ -567,22 +872,27 @@ async function composeFinalVideo({
   const outputPath = path.join(generatedVideoDir, outputName);
 
   const fontPath = pickFontPath();
-  const previewBaseWidth = 390;
+  const previewBaseWidth = 640;
   const outputWidth = 1080;
   const styleScale = outputWidth / previewBaseWidth;
-  const titleSize = Math.max(18, Math.round(Number(titleStyle.size || 64) * styleScale));
-  const subtitleSize = Math.max(16, Math.round(Number(subtitleStyle.size || 42) * styleScale));
+  let titleSize = Math.min(112, Math.max(26, Math.round(Number(titleStyle.size || 64) * styleScale)));
+  const subtitleSize = Math.min(84, Math.max(24, Math.round(Number(subtitleStyle.size || 42) * styleScale)));
   const titleX = Math.max(5, Math.min(95, Number(titleStyle.x || 50)));
   const titleY = Math.max(5, Math.min(95, Number(titleStyle.y || 18)));
   const subtitleX = Math.max(5, Math.min(95, Number(subtitleStyle.x || 50)));
   const subtitleY = Math.max(5, Math.min(95, Number(subtitleStyle.y || 78)));
   const titleColor = String(titleStyle.color || '#ffffff').replace('#', '0x');
   const subtitleColor = String(subtitleStyle.color || '#ffffff').replace('#', '0x');
-  const titleText = String(title || '').replace(/\r?\n/g, ' ').trim();
-  const subtitleText = String(subtitle || '').replace(/\r?\n/g, ' ').trim();
-  const titleXExpr = `(w-text_w)*${(titleX / 100).toFixed(4)}`;
+  const titleText = wrapOverlayForStyle(String(title || ''), {
+    target: 'title',
+    outputSize: titleSize,
+    maxLines: 2,
+    widthPct: titleStyle.width,
+  });
+  titleSize = fitTitleOutputSize(String(title || ''), titleSize, titleStyle.width);
+  const titleXExpr = '(w-text_w)/2';
   const titleYExpr = `(h-text_h)*${(titleY / 100).toFixed(4)}`;
-  const subtitleXExpr = `(w-text_w)*${(subtitleX / 100).toFixed(4)}`;
+  const subtitleXExpr = `(w*${(subtitleX / 100).toFixed(4)})-(text_w/2)`;
   const subtitleYExpr = `(h-text_h)*${(subtitleY / 100).toFixed(4)}`;
   const titleHoldSec = titleHold === 'always' ? null : Math.max(0.5, Number(titleHold) || 8);
 
@@ -594,28 +904,42 @@ async function composeFinalVideo({
   const textTempDir = await mkdtemp(path.join(os.tmpdir(), 'compose-text-'));
   try {
     if (titleText) {
-      const titleTextPath = path.join(textTempDir, 'title.txt');
-      await writeFile(titleTextPath, titleText, 'utf8');
-      const titleArgs = [
-        `textfile='${escapeFilterPath(titleTextPath)}'`,
-        `fontsize=${titleSize}`,
-        `fontcolor=${titleColor}`,
-        `x=${titleXExpr}`,
-        `y=${titleYExpr}`,
-      'shadowx=3',
-      'shadowy=3',
-      'shadowcolor=0x000000',
-      ];
-      if (fontPath) titleArgs.unshift(`fontfile='${escapeDrawText(fontPath)}'`);
-      if (titleHoldSec) titleArgs.push(`enable='between(t,0,${titleHoldSec.toFixed(2)})'`);
-      textFilters.push(`drawtext=${titleArgs.join(':')}`);
+      const titleLines = titleText.split('\n').map((line) => line.trim()).filter(Boolean).slice(0, 2);
+      const titleLineGap = Math.round(titleSize * 0.12);
+      const titleBlockHeight = titleLines.length * titleSize + Math.max(0, titleLines.length - 1) * titleLineGap;
+      for (let i = 0; i < titleLines.length; i += 1) {
+        const titleTextPath = path.join(textTempDir, `title_${i}.txt`);
+        await writeFile(titleTextPath, titleLines[i], 'utf8');
+        const titleArgs = [
+          `textfile='${escapeFilterPath(titleTextPath)}'`,
+          `fontsize=${titleSize}`,
+          `fontcolor=${titleColor}`,
+          'x=(w-text_w)/2',
+          `y=((h-${titleBlockHeight})*${(titleY / 100).toFixed(4)})+${i * (titleSize + titleLineGap)}`,
+          'shadowx=3',
+          'shadowy=3',
+          'shadowcolor=0x000000',
+        ];
+        if (fontPath) titleArgs.unshift(`fontfile='${escapeDrawText(fontPath)}'`);
+        if (titleHoldSec) titleArgs.push(`enable='between(t,0,${titleHoldSec.toFixed(2)})'`);
+        textFilters.push(`drawtext=${titleArgs.join(':')}`);
+      }
     }
 
-    const subtitleChunks = await loadGeneratedSubtitleChunks(audioUrl);
-    for (let i = 0; i < subtitleChunks.length; i += 1) {
-      const chunk = subtitleChunks[i];
+    const subtitleChunks = await loadGeneratedSubtitleChunks(audioUrl, subtitle);
+    const subtitleMaxChars = Math.max(4, estimateColsForOverlay(subtitle, subtitleSize, 'subtitle', subtitleStyle.width));
+    const subtitleRenderChunks = subtitleChunks.flatMap((chunk) => expandSubtitleChunk(chunk, subtitleMaxChars));
+    for (let i = 0; i < subtitleRenderChunks.length; i += 1) {
+      const chunk = subtitleRenderChunks[i];
+      const wrappedLine = wrapOverlayForStyle(chunk.line, {
+        target: 'subtitle',
+        outputSize: subtitleSize,
+        maxLines: 1,
+        widthPct: subtitleStyle.width,
+      });
+      if (!wrappedLine) continue;
       const chunkPath = path.join(textTempDir, `sub_${i}.txt`);
-      await writeFile(chunkPath, chunk.line, 'utf8');
+      await writeFile(chunkPath, wrappedLine, 'utf8');
       const subtitleArgs = [
         `textfile='${escapeFilterPath(chunkPath)}'`,
         `fontsize=${subtitleSize}`,
@@ -658,6 +982,7 @@ async function composeFinalVideo({
       'aac',
       '-b:a',
       '192k',
+      '-shortest',
       '-movflags',
       '+faststart',
       outputPath,
@@ -697,12 +1022,10 @@ async function composeFinalVideo({
   await rm(sourceVideoPath, { force: true });
   await runScan();
 
-  let exportPath = '';
-  if (exportDir) {
-    await mkdir(exportDir, { recursive: true });
-    exportPath = path.join(exportDir, safeExportFileName({ itemNumber, title }));
-    await copyFile(outputPath, exportPath);
-  }
+  const finalExportDir = exportDir || unifiedExportDir;
+  await mkdir(finalExportDir, { recursive: true });
+  const exportPath = path.join(finalExportDir, safeExportFileName({ itemNumber, title }));
+  await copyFile(outputPath, exportPath);
 
   return {
     videoUrl: `/generated_videos/${outputName}`,
@@ -790,19 +1113,28 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && parsedUrl.pathname === '/api/materials/folders') {
+    writeJson(res, 200, {
+      ok: true,
+      materialRoot,
+      unusedDir: bucketDirs.unused,
+      fragmentsDir: bucketDirs.fragments,
+      usedDir: bucketDirs.used,
+      unifiedExportDir,
+    });
+    return;
+  }
+
   if (req.method === 'POST' && parsedUrl.pathname === '/api/batch/folders') {
     try {
-      const body = await readJsonBody(req);
-      const folderName = safeFolderName(body.folderName || `batch_${Date.now()}_videos`);
-      const exportDir = path.join(os.homedir(), 'Desktop', folderName);
       await mkdir(bucketDirs.unused, { recursive: true });
-      await mkdir(exportDir, { recursive: true });
+      await mkdir(unifiedExportDir, { recursive: true });
       openFolder(bucketDirs.unused);
-      openFolder(exportDir);
+      openFolder(unifiedExportDir);
       writeJson(res, 200, {
         ok: true,
         materialDir: bucketDirs.unused,
-        exportDir,
+        exportDir: unifiedExportDir,
       });
     } catch (error) {
       writeJson(res, 500, { ok: false, error: error.message });
@@ -1004,16 +1336,22 @@ const server = createServer(async (req, res) => {
         throw new Error('tts success but no audio returned');
       }
 
-      const subtitleChunks = collectTimedSubtitleChunks(ttsResult);
-      if (!subtitleChunks.length) {
-        throw new Error('tts succeeded but no real subtitle timestamps returned');
-      }
-
       const audioFile = await writeGeneratedAudio({
         itemNumber,
         ext: audioFormat,
         bytes: audioBytes,
       });
+      const durationSec = await getMediaDurationSeconds(audioFile.filePath).catch(() => 0);
+      let subtitleChunks = normalizeTimelineChunks(collectTimedSubtitleChunks(ttsResult), durationSec);
+      let subtitleSource = 'minimax';
+      if (!subtitleChunks.length || timelineCoverageRatio(subtitleChunks, durationSec) < 0.82) {
+        const speechWindow = await detectSpeechWindow(audioFile.filePath, durationSec).catch(() => ({ start: 0, end: durationSec }));
+        subtitleChunks = buildFallbackTimedChunks(text, durationSec, speechWindow);
+        subtitleSource = 'fallback_by_audio_duration';
+      }
+      if (!subtitleChunks.length) {
+        throw new Error('tts succeeded but subtitle timeline build failed');
+      }
       const subtitleUrl = await writeGeneratedSubtitles({
         audioFileName: audioFile.fileName,
         chunks: subtitleChunks,
@@ -1027,6 +1365,7 @@ const server = createServer(async (req, res) => {
         source,
         voiceId,
         subtitleCount: subtitleChunks.length,
+        subtitleSource,
       });
     } catch (error) {
       writeJson(res, 500, { ok: false, error: error.message });
@@ -1058,15 +1397,14 @@ const server = createServer(async (req, res) => {
       const body = await readJsonBody(req);
       const tasks = Array.isArray(body.tasks) ? body.tasks : [];
       if (!tasks.length) throw new Error('batch tasks required');
-      const folderName = safeFolderName(body.folderName || `batch_${Date.now()}`);
-      const exportDir = path.join(os.homedir(), 'Desktop', folderName);
-      const usedBases = new Set();
+      const exportDir = unifiedExportDir;
+      const usedSourceNames = new Set();
       const results = [];
       await runScan();
       const inventory = await loadInventory();
-      const uniqueMaterialBases = new Set((inventory?.unused?.files || []).map((file) => normalizeMaterialBaseName(file.name)));
-      if (uniqueMaterialBases.size < tasks.length) {
-        throw new Error(`not enough unique unused materials: need ${tasks.length}, got ${uniqueMaterialBases.size}`);
+      const availablePool = [...(inventory?.unused?.files || []), ...(inventory?.fragments?.files || [])];
+      if (availablePool.length < tasks.length) {
+        throw new Error(`not enough materials: need ${tasks.length}, got ${availablePool.length}`);
       }
 
       for (const task of tasks) {
@@ -1079,9 +1417,9 @@ const server = createServer(async (req, res) => {
           titleHold: String(task.titleHold || '8'),
           audioUrl: String(task.audioUrl || ''),
           exportDir,
-          excludedMaterialBases: usedBases,
+          excludedMaterialNames: usedSourceNames,
         });
-        usedBases.add(result.sourceBase);
+        if (result.sourceMaterial) usedSourceNames.add(result.sourceMaterial);
         results.push({
           taskId: String(task.id || ''),
           ...result,
@@ -1105,3 +1443,5 @@ const server = createServer(async (req, res) => {
 server.listen(port, host, () => {
   console.log(`Materials API ready: http://${host}:${port}`);
 });
+
+

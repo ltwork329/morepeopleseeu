@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd3df"/>
+      <stop offset="0.38" stop-color="#ffe5bf"/>
+      <stop offset="0.68" stop-color="#bdebf0"/>
+      <stop offset="1" stop-color="#fff3dc"/>
+    </linearGradient>
+    <linearGradient id="sea" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#79c7df"/>
+      <stop offset="0.55" stop-color="#7fd4d0"/>
+      <stop offset="1" stop-color="#f8d7a7"/>
+    </linearGradient>
+    <radialGradient id="sun" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#fff7c0"/>
+      <stop offset="0.65" stop-color="#ffc982"/>
+      <stop offset="1" stop-color="#ff9ab0" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft"><feGaussianBlur stdDeviation="8"/></filter>
+  </defs>
+  <rect width="1600" height="1000" fill="url(#sky)"/>
+  <circle cx="1240" cy="170" r="180" fill="url(#sun)" opacity="0.85"/>
+  <g opacity="0.42" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round">
+    <path d="M80 250 C260 180 410 310 590 230 S930 180 1120 250 S1410 330 1560 230"/>
+    <path d="M150 330 C330 270 490 380 690 315 S1010 270 1210 335 S1460 410 1600 320"/>
+  </g>
+  <rect y="430" width="1600" height="270" fill="url(#sea)" opacity="0.78"/>
+  <g fill="none" stroke="#ffffff" stroke-width="8" stroke-linecap="round" opacity="0.8">
+    <path d="M-40 500 C150 470 280 540 470 505 S800 470 990 515 S1300 560 1640 500"/>
+    <path d="M-80 590 C120 555 300 635 520 590 S860 555 1080 605 S1390 650 1680 585"/>
+    <path d="M-80 675 C170 650 350 720 610 680 S930 650 1190 705 S1450 760 1680 690"/>
+  </g>
+  <path d="M0 680 C260 630 450 690 670 660 C930 625 1150 710 1600 650 L1600 1000 L0 1000 Z" fill="#ffe2b3"/>
+  <path d="M0 760 C280 700 530 780 820 730 C1110 680 1300 760 1600 720 L1600 1000 L0 1000 Z" fill="#ffd5bd" opacity="0.75"/>
+  <g opacity="0.26" stroke="#b98768" stroke-width="3" fill="none">
+    <path d="M80 815 C250 790 360 835 520 805"/>
+    <path d="M820 835 C980 790 1110 850 1280 810"/>
+    <path d="M1180 900 C1300 875 1420 920 1535 895"/>
+  </g>
+  <g transform="translate(500 575)">
+    <ellipse cx="70" cy="250" rx="170" ry="40" fill="#d18b76" opacity="0.22" filter="url(#soft)"/>
+    <path d="M45 76 C15 96 0 135 8 188 C22 280 120 302 174 242 C225 184 205 96 145 70 C110 54 74 56 45 76 Z" fill="#ffd2b7"/>
+    <path d="M35 82 C55 20 135 20 170 78 C120 65 78 120 12 118 C14 104 22 92 35 82 Z" fill="#3d2b34"/>
+    <path d="M18 155 C-40 188 -84 246 -122 333" stroke="#84b8cf" stroke-width="42" stroke-linecap="round"/>
+    <path d="M150 180 C215 215 270 270 320 344" stroke="#84b8cf" stroke-width="42" stroke-linecap="round"/>
+    <path d="M20 190 C75 165 145 166 190 205 C175 305 92 335 0 288 C-10 242 -3 212 20 190 Z" fill="#f7f2f7"/>
+    <path d="M-26 285 C-72 315 -138 355 -218 396" stroke="#ffd2b7" stroke-width="34" stroke-linecap="round"/>
+    <path d="M178 280 C235 305 300 338 366 374" stroke="#ffd2b7" stroke-width="34" stroke-linecap="round"/>
+  </g>
+  <g transform="translate(770 765)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M0 40 C35 10 78 10 112 42" stroke="#e86f46" stroke-width="13"/>
+    <path d="M20 55 C45 82 76 80 98 55" stroke="#e86f46" stroke-width="13"/>
+    <circle cx="24" cy="18" r="9" fill="#e86f46"/>
+    <circle cx="90" cy="18" r="9" fill="#e86f46"/>
+    <path d="M8 60 L-35 90 M102 60 L145 88 M18 74 L-18 112 M90 74 L130 110" stroke="#e86f46" stroke-width="9"/>
+  </g>
+  <g fill="#fff" opacity="0.76">
+    <circle cx="930" cy="390" r="18"/>
+    <circle cx="970" cy="330" r="10"/>
+    <circle cx="1035" cy="410" r="13"/>
+    <circle cx="880" cy="455" r="8"/>
+  </g>
+  <g fill="none" stroke="#8a6a54" stroke-width="5" stroke-linecap="round" opacity="0.55">
+    <path d="M1180 120 C1210 95 1240 95 1270 120"/>
+    <path d="M1295 150 C1320 130 1345 130 1370 150"/>
+    <path d="M1100 190 C1128 168 1155 168 1184 190"/>
+  </g>
+</svg>

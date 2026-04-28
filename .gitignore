@@ -19,5 +19,7 @@ local_materials/material_inventory.json
 
 *.log
 *.tmp
+release/
+*.zip
 Thumbs.db
 .DS_Store

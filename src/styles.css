@@ -26,6 +26,8 @@ body {
   min-width: 320px;
   min-height: 100vh;
   background:
+    linear-gradient(180deg, rgba(255, 242, 248, 0.7), rgba(255, 242, 248, 0.94)),
+    url("/ocean-girl-bg.svg") center top / cover fixed no-repeat,
     radial-gradient(circle at 18% 12%, rgba(255, 132, 187, 0.34), transparent 28%),
     radial-gradient(circle at 82% 4%, rgba(255, 220, 98, 0.28), transparent 25%),
     linear-gradient(135deg, rgba(255, 212, 232, 0.88), transparent 38%),
@@ -289,18 +291,162 @@ h2 {
 
 .batch-shell {
   display: grid;
-  grid-template-columns: minmax(460px, 0.9fr) minmax(420px, 1fr);
-  gap: 18px;
+  grid-template-columns: minmax(760px, 1.35fr) minmax(420px, 0.85fr);
+  gap: 14px;
+  align-items: start;
+  height: calc(100vh - 160px);
+  min-height: 680px;
+}
+
+.batch-left {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
 }
 
 .batch-list-panel {
-  grid-column: 1 / -1;
+  padding: 16px;
+}
+
+.batch-preview-panel {
+  padding: 14px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.batch-preview-panel .preview-workbench {
+  grid-template-columns: minmax(260px, 320px) minmax(280px, 1fr);
+  gap: 10px;
+}
+
+.batch-preview-panel .compose-preview {
+  min-height: 420px;
+  width: min(100%, 320px);
+}
+
+.batch-preview-panel .style-card {
+  padding: 12px;
+}
+
+.batch-preview-panel .style-card h3 {
+  margin-bottom: 8px;
+}
+
+.batch-preview-panel .style-card label {
+  margin-top: 4px;
+}
+
+.batch-records-panel {
+  padding: 14px;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
 }
 
 .batch-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(180px, 1fr));
   gap: 12px;
+}
+
+.batch-upload-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.batch-upload-compact {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed #ddb9ac;
+  border-radius: 12px;
+  background: #fff8f2;
+  color: #a6332f;
+  min-height: 40px;
+  padding: 0 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.batch-upload-compact input {
+  display: none;
+}
+
+.batch-upload-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.batch-docs-fold {
+  margin: 8px 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.batch-docs-fold summary {
+  padding: 10px 12px;
+  cursor: pointer;
+  font-weight: 800;
+  color: var(--ink);
+}
+
+.batch-docs-wrap {
+  max-height: 180px;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+}
+
+.batch-docs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.batch-docs-table th,
+.batch-docs-table td {
+  text-align: left;
+  vertical-align: top;
+  padding: 8px 10px;
+  border-bottom: 1px solid #f1dbe8;
+}
+
+.batch-docs-table th {
+  color: var(--muted);
+  font-weight: 900;
+  background: #fff7fb;
+}
+
+.batch-path-tip {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--ink);
+}
+
+.batch-path-tip span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.batch-path-tip code {
+  padding: 2px 6px;
+  border-radius: 8px;
+  background: #fff7fb;
+  border: 1px solid #f1dbe8;
+  color: #6d2c57;
 }
 
 .batch-stats {
@@ -630,9 +776,10 @@ h2 {
 .preview-title,
 .preview-subtitle {
   position: absolute;
-  max-width: 92%;
+  min-width: 24%;
+  max-width: 96%;
   border: 1px dashed rgba(255, 255, 255, 0.85);
-  padding: 6px 10px;
+  padding: 6px 12px;
   border-radius: 10px;
   background: rgba(40, 35, 58, 0.18);
   font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
@@ -643,9 +790,11 @@ h2 {
   transform: translate(-50%, -50%);
   touch-action: none;
   user-select: none;
-  white-space: nowrap;
+  white-space: pre-line;
   overflow: hidden;
-  text-overflow: ellipsis;
+  text-overflow: clip;
+  word-break: keep-all;
+  overflow-wrap: normal;
   cursor: grab;
   letter-spacing: 0;
   z-index: 3;
@@ -653,8 +802,67 @@ h2 {
 
 .preview-subtitle {
   font-weight: 700;
-  max-width: 94%;
   font-size: clamp(24px, 7vw, 42px);
+}
+
+.preview-text {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  pointer-events: none;
+}
+
+.preview-title .preview-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  max-height: 2.3em;
+  overflow: hidden;
+  white-space: pre-line;
+}
+
+.preview-subtitle .preview-text {
+  display: block;
+  max-height: 1.15em;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 14px;
+  z-index: 4;
+  cursor: ew-resize;
+}
+
+.resize-handle.left {
+  left: -7px;
+}
+
+.resize-handle.right {
+  right: -7px;
+}
+
+.resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 35%;
+  bottom: 35%;
+  width: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 1px rgba(61, 22, 48, 0.28);
+}
+
+.resize-handle.left::after {
+  left: 5px;
+}
+
+.resize-handle.right::after {
+  right: 5px;
 }
 
 .preview-title:active,
@@ -1031,16 +1239,20 @@ select:focus {
 .batch-simple-list {
   display: grid;
   gap: 8px;
+  max-height: none;
+  height: 100%;
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .batch-simple-row {
   display: grid;
-  grid-template-columns: 88px minmax(180px, 1fr) 110px 110px 110px minmax(180px, 0.8fr);
-  gap: 10px;
+  grid-template-columns: 88px minmax(140px, 1fr) 74px 74px 74px minmax(180px, 1fr) 70px;
+  gap: 8px;
   align-items: center;
   width: 100%;
-  padding: 10px 12px;
-  border: 1px solid transparent;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
   border-radius: 14px;
   background: #fff;
   color: var(--ink);
@@ -1055,6 +1267,91 @@ select:focus {
   justify-self: end;
   color: var(--muted);
   text-align: right;
+  font-size: 12px;
+}
+
+.batch-row-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.batch-row-actions .soft {
+  min-height: 28px;
+  padding: 0 8px;
+}
+
+.batch-running-tip {
+  margin-top: 8px;
+  color: #8b4a6d;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.batch-path-tip-note {
+  margin-top: 10px;
+  align-self: end;
+}
+
+.batch-path-fold {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.batch-path-fold summary {
+  padding: 10px 12px;
+  cursor: pointer;
+  font-weight: 800;
+  color: var(--muted);
+}
+
+.batch-path-fold .batch-path-tip {
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+}
+
+.batch-history-fold {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.batch-history-fold summary {
+  padding: 10px 12px;
+  cursor: pointer;
+  font-weight: 800;
+  color: var(--muted);
+}
+
+.batch-history-list {
+  margin: 0;
+  padding: 8px 18px 12px;
+  border-top: 1px solid var(--line);
+  max-height: 180px;
+  overflow: auto;
+}
+
+.batch-history-list li {
+  margin: 6px 0;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.notice-modal-card {
+  width: min(520px, 95vw);
+}
+
+.notice-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  color: var(--ink);
 }
 
 .compose-record-row {
@@ -1225,7 +1522,8 @@ select:focus {
   }
 
   .batch-form-grid,
-  .batch-stats {
+  .batch-stats,
+  .batch-upload-row {
     grid-template-columns: 1fr;
   }
 
