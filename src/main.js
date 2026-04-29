@@ -21,7 +21,77 @@ const defaultMaterialFolders = {
   unifiedExportDir: 'Desktop/让更多人看到你_成片',
 };
 
+const projectMeta = {
+  waidan: {
+    label: '外单项目',
+    shortLabel: '外单',
+    note: '保持现有完整链路：文案、音频、字幕校对、视频合成。',
+  },
+  kitchen: {
+    label: '二手厨具项目',
+    shortLabel: '厨具',
+    note: '独立走完整链路，并强制从外场、航拍、仓库内部三个素材池按比例拼接。',
+  },
+};
+
+const defaultKitchenProjectConfig = {
+  fragmentThreshold: 10,
+  ratios: {
+    outdoor: 50,
+    aerial: 25,
+    warehouse: 25,
+  },
+  pools: {
+    outdoor: {
+      label: '外场',
+      unusedDir: 'local_materials/kitchen/outdoor/unused',
+      fragmentsDir: 'local_materials/kitchen/outdoor/fragments',
+      usedDir: 'local_materials/kitchen/outdoor/used',
+    },
+    aerial: {
+      label: '航拍',
+      unusedDir: 'local_materials/kitchen/aerial/unused',
+      fragmentsDir: 'local_materials/kitchen/aerial/fragments',
+      usedDir: 'local_materials/kitchen/aerial/used',
+    },
+    warehouse: {
+      label: '仓库内部',
+      unusedDir: 'local_materials/kitchen/warehouse/unused',
+      fragmentsDir: 'local_materials/kitchen/warehouse/fragments',
+      usedDir: 'local_materials/kitchen/warehouse/used',
+    },
+  },
+};
+
+function createEmptyInventoryBucket() {
+  return { count: 0, totalDuration: 0, files: [] };
+}
+
+function createKitchenInventory() {
+  return {
+    outdoor: {
+      label: '外场',
+      unused: createEmptyInventoryBucket(),
+      fragments: createEmptyInventoryBucket(),
+      used: createEmptyInventoryBucket(),
+    },
+    aerial: {
+      label: '航拍',
+      unused: createEmptyInventoryBucket(),
+      fragments: createEmptyInventoryBucket(),
+      used: createEmptyInventoryBucket(),
+    },
+    warehouse: {
+      label: '仓库内部',
+      unused: createEmptyInventoryBucket(),
+      fragments: createEmptyInventoryBucket(),
+      used: createEmptyInventoryBucket(),
+    },
+  };
+}
+
 const initialState = {
+  projectType: 'waidan',
   activeView: 'audio',
   workMode: 'single',
   activeTaskId: null,
@@ -35,15 +105,18 @@ const initialState = {
   previewVideoUrl: '',
   noticeMessage: '',
   materialFolders: defaultMaterialFolders,
+  kitchenProjectConfig: defaultKitchenProjectConfig,
   materialInventory: {
-    unused: { count: 0, totalDuration: 0, files: [] },
-    fragments: { count: 0, totalDuration: 0, files: [] },
-    used: { count: 0, totalDuration: 0, files: [] },
+    unused: createEmptyInventoryBucket(),
+    fragments: createEmptyInventoryBucket(),
+    used: createEmptyInventoryBucket(),
+    kitchen: createKitchenInventory(),
     updatedAt: null,
   },
 };
 
 let state = loadState();
+const subtitleEditorOpenState = new Map();
 
 function loadState() {
   const raw = localStorage.getItem(STORAGE_KEY);
@@ -54,8 +127,10 @@ function loadState() {
     const activeView = allowedViews.has(saved.activeView) ? saved.activeView : 'audio';
     const workMode = saved.workMode === 'batch' ? 'batch' : 'single';
     const defaultVoiceId = saved.defaultVoiceId || null;
+    const projectType = saved.projectType === 'kitchen' ? 'kitchen' : 'waidan';
     return {
       ...saved,
+      projectType,
       activeView,
       workMode,
       tasks: saved.tasks.map((task) => normalizeTask(task, defaultVoiceId)),
@@ -63,6 +138,18 @@ function loadState() {
       batchProcessingBatchId: saved.batchProcessingBatchId || null,
       noticeMessage: '',
       materialFolders: saved.materialFolders || defaultMaterialFolders,
+      kitchenProjectConfig: {
+        ...defaultKitchenProjectConfig,
+        ...(saved.kitchenProjectConfig || {}),
+        ratios: {
+          ...defaultKitchenProjectConfig.ratios,
+          ...((saved.kitchenProjectConfig || {}).ratios || {}),
+        },
+        pools: {
+          ...defaultKitchenProjectConfig.pools,
+          ...((saved.kitchenProjectConfig || {}).pools || {}),
+        },
+      },
       materialInventory: saved.materialInventory || initialState.materialInventory,
     };
   } catch {
@@ -73,17 +160,19 @@ function loadState() {
 function normalizeTask(task, fallbackVoiceId = null) {
   return {
     ...task,
+    projectType: task.projectType === 'kitchen' ? 'kitchen' : 'waidan',
     itemNumber: task.itemNumber || `${getTodayKey()}_0001`,
-    titleStyle: { width: 72, ...(task.titleStyle || { size: 64, color: '#ffffff', x: 50, y: 18 }) },
+    titleStyle: { width: 72, shadowColor: '#000000', ...(task.titleStyle || { size: 64, color: '#ffffff', x: 50, y: 18 }) },
     subtitleStyle: { width: 72, ...(task.subtitleStyle || { size: 42, color: '#ffffff', x: 50, y: 78 }) },
     selectedVoiceId: task.selectedVoiceId || fallbackVoiceId,
     composeHistory: task.composeHistory || [],
     materialFrameUrl: task.materialFrameUrl || null,
-    audioUrl: task.audioUrl || '',
+    audioUrl: normalizeAudioUrl(task.audioUrl || ''),
     videoUrl: task.videoUrl || '',
     outputPath: task.outputPath || '',
     titleHold: task.titleHold || '8',
     audioTraceId: task.audioTraceId || '',
+    subtitleText: String(task.subtitleText || task.body || '').trim(),
     subtitleConfirmed: Boolean(task.subtitleConfirmed),
     statusReason: task.statusReason || '',
   };
@@ -113,6 +202,119 @@ function setState(nextState) {
   render();
 }
 
+function isSubtitleEditorOpen(taskId, fallback = true) {
+  if (!taskId) return fallback;
+  return subtitleEditorOpenState.has(taskId) ? subtitleEditorOpenState.get(taskId) : fallback;
+}
+
+function setSubtitleEditorOpen(taskId, isOpen) {
+  if (!taskId) return;
+  subtitleEditorOpenState.set(taskId, Boolean(isOpen));
+}
+
+function getCurrentProjectMeta() {
+  return projectMeta[state.projectType] || projectMeta.waidan;
+}
+
+function getProjectTypeLabel(projectType = state.projectType) {
+  return projectMeta[projectType]?.label || projectMeta.waidan.label;
+}
+
+function getProjectTasks(projectType = state.projectType) {
+  return (state.tasks || []).filter((task) => (task.projectType || 'waidan') === projectType);
+}
+
+function renderKitchenEmptyBridge(message = '当前二手厨具项目还是空的。') {
+  return renderEmpty(message);
+}
+
+function getKitchenConfig() {
+  const saved = state.kitchenProjectConfig || defaultKitchenProjectConfig;
+  return {
+    fragmentThreshold: Math.max(1, Number(saved.fragmentThreshold || defaultKitchenProjectConfig.fragmentThreshold)),
+    ratios: {
+      outdoor: Math.max(0, Number(saved.ratios?.outdoor ?? defaultKitchenProjectConfig.ratios.outdoor)),
+      aerial: Math.max(0, Number(saved.ratios?.aerial ?? defaultKitchenProjectConfig.ratios.aerial)),
+      warehouse: Math.max(0, Number(saved.ratios?.warehouse ?? defaultKitchenProjectConfig.ratios.warehouse)),
+    },
+    pools: {
+      outdoor: { ...defaultKitchenProjectConfig.pools.outdoor, ...(saved.pools?.outdoor || {}) },
+      aerial: { ...defaultKitchenProjectConfig.pools.aerial, ...(saved.pools?.aerial || {}) },
+      warehouse: { ...defaultKitchenProjectConfig.pools.warehouse, ...(saved.pools?.warehouse || {}) },
+    },
+  };
+}
+
+function updateKitchenRatio(poolKey, value) {
+  const current = getKitchenConfig();
+  const next = {
+    ...current,
+    ratios: {
+      ...current.ratios,
+      [poolKey]: Math.max(0, Number(value || 0)),
+    },
+  };
+  setState({ kitchenProjectConfig: next });
+}
+
+function updateKitchenFragmentThreshold(value) {
+  const current = getKitchenConfig();
+  setState({
+    kitchenProjectConfig: {
+      ...current,
+      fragmentThreshold: Math.max(1, Number(value || 10)),
+    },
+  });
+}
+
+function updateKitchenPoolPath(poolKey, pathKey, value) {
+  const current = getKitchenConfig();
+  setState({
+    kitchenProjectConfig: {
+      ...current,
+      pools: {
+        ...current.pools,
+        [poolKey]: {
+          ...current.pools[poolKey],
+          [pathKey]: String(value || '').trim(),
+        },
+      },
+    },
+  });
+}
+
+function renderKitchenConfigPanel(mode = 'compose') {
+  if (state.projectType !== 'kitchen') return '';
+  const config = getKitchenConfig();
+  const totalRatio = Number(config.ratios.outdoor || 0) + Number(config.ratios.aerial || 0) + Number(config.ratios.warehouse || 0);
+  const title = mode === 'batch' ? '二手厨具视频池配置' : '二手厨具合成配置';
+  const hint = mode === 'batch'
+    ? '批量视频会严格按这里的比例，从外场、航拍、仓库内部三个池子的可用素材各截一段再拼接。'
+    : '当前单条视频会严格按这里的比例，从外场、航拍、仓库内部三个池子的可用素材各截一段再拼接。';
+  return `
+    <section class="panel kitchen-config-panel">
+      <p class="eyebrow">二手厨具项目</p>
+      <h3>${title}</h3>
+      <p class="hint">${hint} 预览图默认先抓外场池。</p>
+      <div class="kitchen-ratio-strip">
+        <label class="kitchen-inline-field">外场
+          <input type="number" min="0" max="100" value="${Number(config.ratios.outdoor || 0)}" data-kitchen-ratio="outdoor" />
+        </label>
+        <label class="kitchen-inline-field">航拍
+          <input type="number" min="0" max="100" value="${Number(config.ratios.aerial || 0)}" data-kitchen-ratio="aerial" />
+        </label>
+        <label class="kitchen-inline-field">仓库内部
+          <input type="number" min="0" max="100" value="${Number(config.ratios.warehouse || 0)}" data-kitchen-ratio="warehouse" />
+        </label>
+        <label class="kitchen-inline-field kitchen-threshold-field">残片阈值
+          <input type="number" min="1" max="60" value="${config.fragmentThreshold}" data-kitchen-threshold="true" />
+        </label>
+      </div>
+      <div class="kitchen-ratio-summary ${totalRatio === 100 ? 'ok' : 'warn'}">比例合计 ${totalRatio}% ${totalRatio === 100 ? '' : '，建议调到 100%'}</div>
+    </section>
+  `;
+}
+
 function notify(message) {
   setState({ noticeMessage: String(message || '') });
 }
@@ -122,7 +324,16 @@ async function loadMaterialInventory() {
     const response = await fetch(`/material_inventory.json?ts=${Date.now()}`);
     if (!response.ok) return;
     const inventory = await response.json();
-    setState({ materialInventory: { ...initialState.materialInventory, ...inventory } });
+    setState({
+      materialInventory: {
+        ...initialState.materialInventory,
+        ...inventory,
+        kitchen: {
+          ...createKitchenInventory(),
+          ...(inventory.kitchen || {}),
+        },
+      },
+    });
   } catch {
     // Inventory is optional until the local scan script has been run.
   }
@@ -182,20 +393,36 @@ function getTodayKey() {
   ].join('');
 }
 
+function getNextItemSequence(day = getTodayKey()) {
+  const prefix = `${day}_`;
+  const maxExisting = getProjectTasks().reduce((max, task) => {
+    const itemNumber = String(task?.itemNumber || '');
+    if (!itemNumber.startsWith(prefix)) return max;
+    const sequence = Number.parseInt(itemNumber.slice(prefix.length), 10);
+    return Number.isFinite(sequence) ? Math.max(max, sequence) : max;
+  }, 0);
+  return maxExisting + 1;
+}
+
 function createTask({ batchId, index, title, body, language = 'yue' }) {
-  const sequence = String(index).padStart(4, '0');
-  const itemNumber = `${getTodayKey()}_${sequence}`;
+  const day = getTodayKey();
+  const sequenceNumber = getNextItemSequence(day) + Math.max(0, Number(index || 1) - 1);
+  const sequence = String(sequenceNumber).padStart(4, '0');
+  const itemNumber = `${day}_${sequence}`;
   const id = `${batchId}_item_${sequence}`;
   return {
     id,
+    projectType: state.projectType,
     itemNumber,
     batchId,
     title: title.trim(),
     body: body.trim(),
+    subtitleText: body.trim(),
     language: language || 'yue',
     titleStyle: {
       size: 64,
       color: '#ffffff',
+      shadowColor: '#000000',
       x: 50,
       y: 18,
       width: 72,
@@ -228,6 +455,26 @@ function createTask({ batchId, index, title, body, language = 'yue' }) {
   };
 }
 
+function normalizeAudioUrl(audioUrl) {
+  const text = String(audioUrl || '').trim();
+  if (!text) return '';
+  try {
+    const url = new URL(text, window.location.origin);
+    if (url.pathname.startsWith('/generated_audio/')) {
+      return `${url.pathname}${url.search}`;
+    }
+    if (url.pathname === '/api/generated/audio') {
+      const fileName = url.searchParams.get('name');
+      if (!fileName) return '';
+      const ts = url.searchParams.get('ts');
+      return `/generated_audio/${fileName}${ts ? `?ts=${ts}` : ''}`;
+    }
+    return url.toString();
+  } catch {
+    return text;
+  }
+}
+
 async function fileToBase64(file) {
   const buffer = await file.arrayBuffer();
   let binary = '';
@@ -243,7 +490,9 @@ async function fileToBase64(file) {
 async function grabMaterialFrame(taskId) {
   try {
     await scanMaterialsFromUi();
-    const response = await fetch('http://127.0.0.1:3210/api/materials/first-frame');
+    const task = state.tasks.find((item) => item.id === taskId);
+    const projectType = task?.projectType || state.projectType || 'waidan';
+    const response = await fetch(`http://127.0.0.1:3210/api/materials/first-frame?projectType=${encodeURIComponent(projectType)}`);
     const result = await response.json();
     if (!response.ok || !result.ok) {
       throw new Error(result.error || '首帧抓取失败');
@@ -316,7 +565,7 @@ async function rematchMaterial(taskId) {
   }
 
   try {
-    const response = await fetch('http://127.0.0.1:3210/api/materials/first-frame');
+    const response = await fetch(`http://127.0.0.1:3210/api/materials/first-frame?projectType=${encodeURIComponent(current.projectType || state.projectType || 'waidan')}`);
     const result = await response.json();
     if (!response.ok || !result.ok) {
       throw new Error(result.error || '首帧抓取失败');
@@ -470,7 +719,8 @@ async function importBatchExcel(event) {
 
 async function addVoice(event) {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
   const name = String(form.get('voiceName') || '').trim();
   const sampleFile = form.get('voiceSample');
   if (!name) {
@@ -517,7 +767,7 @@ async function addVoice(event) {
       defaultVoiceId: state.defaultVoiceId || voice.id,
     });
     addOperationLog('声音克隆成功', `${voice.name} / ${voice.id}`);
-    event.currentTarget.reset();
+    formElement?.reset();
     notify('声音克隆成功');
   } catch (error) {
     addOperationLog('声音克隆失败', error.message, 'error');
@@ -676,13 +926,15 @@ async function generateAudio(taskId) {
             ...item,
             selectedVoiceId: voiceId,
             audioStatus: '已生成',
-            audioUrl: `${result.audioUrl}?ts=${Date.now()}`,
+            audioUrl: normalizeAudioUrl(`${result.audioUrl}?ts=${Date.now()}`),
             audioTraceId: result.traceId || '',
+            subtitleText: String(item.subtitleText || item.body || '').trim(),
+            subtitleConfirmed: false,
             stepIndex: Math.max(item.stepIndex, 1),
             progress: Math.max(item.progress, 17),
             status: '待合成',
             statusReason: '',
-            message: '音频已生成，等待视频合成',
+            message: '音频已生成，请先确认字幕和标题样式',
             updatedAt: new Date().toISOString(),
           }
         : item,
@@ -753,6 +1005,10 @@ async function composeVideo(taskId) {
     notify('请先生成音频，再一键合成视频。');
     return;
   }
+  if (!task.subtitleConfirmed) {
+    notify('请先确认这条任务的字幕和标题样式，再开始合成视频。');
+    return;
+  }
 
   const runningTasks = state.tasks.map((item) =>
     item.id === taskId
@@ -771,12 +1027,14 @@ async function composeVideo(taskId) {
 
   try {
     const cleanAudioUrl = String(task.audioUrl).split('?')[0];
-    const subtitle = String(task.body || '').trim() || '字幕预览文字';
+    const subtitle = getTaskSubtitleText(task);
     const response = await fetch('http://127.0.0.1:3210/api/compose/render', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         itemNumber: task.itemNumber,
+        projectType: task.projectType || state.projectType || 'waidan',
+        kitchenConfig: state.projectType === 'kitchen' ? getKitchenConfig() : null,
         title: task.title,
         subtitle,
         titleStyle: task.titleStyle,
@@ -810,7 +1068,12 @@ async function composeVideo(taskId) {
     );
     setState({ tasks: doneTasks });
     await scanMaterialsFromUi({ silent: true });
-    addOperationLog('视频合成成功', `#${task.itemNumber} ${result.videoUrl}`);
+    const segmentDetail = formatSegmentDetails(result.segmentDetails || []);
+    const sourceDetail = (result.sourceMaterials || []).filter(Boolean).join(' / ');
+    addOperationLog(
+      '视频合成成功',
+      `#${task.itemNumber} ${result.videoUrl}${segmentDetail ? ` ｜分段：${segmentDetail}` : sourceDetail ? ` ｜素材：${sourceDetail}` : ''}`,
+    );
   } catch (error) {
     const failedTasks = state.tasks.map((item) =>
       item.id === taskId
@@ -829,7 +1092,7 @@ async function composeVideo(taskId) {
 }
 
 function getBatchTasks(batchId) {
-  return state.tasks.filter((task) => task.batchId === batchId);
+  return getProjectTasks().filter((task) => task.batchId === batchId);
 }
 
 function applyBatchVoice(batchId, voiceId) {
@@ -874,7 +1137,91 @@ function confirmBatchSubtitles(batchId) {
       : task,
   );
   setState({ tasks });
-  addOperationLog('批量字幕确认', `${batchId} 已确认`);
+  addOperationLog('批量字幕确认', `${batchId} 已确认标题和字幕样式`);
+  notify('这个批次的标题和字幕样式已确认，可以继续导出视频。');
+}
+
+function confirmTaskSubtitle(taskId) {
+  if (!taskId) return;
+  syncTaskSubtitleFromDom(taskId);
+  const current = state.tasks.find((task) => task.id === taskId);
+  if (!current) return;
+  const tasks = state.tasks.map((task) =>
+    task.id === taskId
+      ? {
+          ...task,
+          subtitleConfirmed: true,
+          updatedAt: new Date().toISOString(),
+        }
+      : task,
+  );
+  setState({ tasks });
+  addOperationLog('字幕确认', `#${current.itemNumber} 已确认标题和字幕样式`);
+  notify('这条任务的标题和字幕样式已确认，可以开始合成视频。');
+}
+
+function updateTaskSubtitleText(taskId, value) {
+  const tasks = state.tasks.map((task) =>
+    task.id === taskId
+      ? {
+          ...task,
+          subtitleText: String(value || ''),
+          subtitleConfirmed: false,
+          updatedAt: new Date().toISOString(),
+        }
+      : task,
+  );
+  setState({ tasks });
+}
+
+function readSubtitleEditorValue(taskId) {
+  const textarea = document.querySelector(`[data-subtitle-text-task="${taskId}"]`);
+  return textarea ? textarea.value : null;
+}
+
+function syncTaskSubtitleFromDom(taskId) {
+  const currentValue = readSubtitleEditorValue(taskId);
+  if (currentValue === null) return;
+  const currentTask = state.tasks.find((task) => task.id === taskId);
+  if (!currentTask) return;
+  if (String(currentTask.subtitleText || '') === String(currentValue)) return;
+  updateTaskSubtitleText(taskId, currentValue);
+}
+
+function replaceTaskSubtitle(taskId, replaceAll = false) {
+  if (!taskId) return;
+  syncTaskSubtitleFromDom(taskId);
+  const findInput = document.querySelector(`[data-subtitle-find="${taskId}"]`);
+  const replaceInput = document.querySelector(`[data-subtitle-replace="${taskId}"]`);
+  const findValue = String(findInput?.value || '').trim();
+  const replaceValue = String(replaceInput?.value || '');
+  if (!findValue) {
+    notify('请先输入要替换的字。');
+    return;
+  }
+
+  const current = state.tasks.find((task) => task.id === taskId);
+  if (!current) return;
+  const source = String(current.subtitleText || current.body || '');
+  const nextText = replaceAll
+    ? source.split(findValue).join(replaceValue)
+    : source.replace(findValue, replaceValue);
+
+  if (nextText === source) {
+    notify('当前字幕里没有找到这个词。');
+    return;
+  }
+
+  updateTaskSubtitleText(taskId, nextText);
+  addOperationLog('字幕替换', `#${current.itemNumber} ${findValue} → ${replaceValue}`);
+}
+
+function rememberTaskSubtitle(taskId) {
+  syncTaskSubtitleFromDom(taskId);
+  const current = state.tasks.find((task) => task.id === taskId);
+  if (!current) return;
+  addOperationLog('字幕暂存', `#${current.itemNumber} 已保存当前字幕修改`);
+  notify('当前字幕修改已保存。');
 }
 
 function applyStyleToBatch(batchId, sourceTaskId) {
@@ -888,6 +1235,7 @@ function applyStyleToBatch(batchId, sourceTaskId) {
           titleStyle: { ...source.titleStyle },
           subtitleStyle: { ...source.subtitleStyle },
           titleHold: source.titleHold,
+          subtitleConfirmed: false,
           updatedAt: new Date().toISOString(),
         }
       : task,
@@ -959,6 +1307,11 @@ async function runBatchRender(batchId, tasksToRender, runLabel = '批量合成')
     notify('没有可合成的任务。');
     return;
   }
+  const unconfirmedTasks = tasksToRender.filter((task) => !task.subtitleConfirmed);
+  if (unconfirmedTasks.length) {
+    notify(`请先确认字幕和标题样式，再继续合成。当前还有 ${unconfirmedTasks.length} 条未确认。`);
+    return;
+  }
   const taskIds = new Set(tasksToRender.map((task) => task.id));
   const runningTasks = state.tasks.map((task) =>
     task.batchId === batchId && taskIds.has(task.id)
@@ -977,8 +1330,9 @@ async function runBatchRender(batchId, tasksToRender, runLabel = '批量合成')
     const payloadTasks = tasksToRender.map((task) => ({
       id: task.id,
       itemNumber: task.itemNumber,
+      projectType: task.projectType || state.projectType || 'waidan',
       title: task.title,
-      subtitle: String(task.body || '').trim() || '字幕预览文字',
+      subtitle: getTaskSubtitleText(task),
       titleStyle: task.titleStyle || {},
       subtitleStyle: task.subtitleStyle || {},
       titleHold: task.titleHold || '8',
@@ -987,7 +1341,11 @@ async function runBatchRender(batchId, tasksToRender, runLabel = '批量合成')
     const response = await fetch('http://127.0.0.1:3210/api/compose/batch-render', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tasks: payloadTasks }),
+      body: JSON.stringify({
+        projectType: state.projectType || 'waidan',
+        kitchenConfig: state.projectType === 'kitchen' ? getKitchenConfig() : null,
+        tasks: payloadTasks,
+      }),
     });
     const result = await response.json();
     if (!response.ok || !result.ok) {
@@ -1015,7 +1373,14 @@ async function runBatchRender(batchId, tasksToRender, runLabel = '批量合成')
     });
     setState({ tasks: nextTasks, batchProcessingBatchId: null });
     await scanMaterialsFromUi({ silent: true });
-    addOperationLog(runLabel, `${batchId} 共导出 ${(result.results || []).length} 条`);
+    const batchDetails = (result.results || [])
+      .map((item) => {
+        const detail = formatSegmentDetails(item.segmentDetails || []);
+        return detail ? `#${item.taskId || item.itemNumber || ''} ${detail}` : '';
+      })
+      .filter(Boolean)
+      .join('\n');
+    addOperationLog(runLabel, `${batchId} 共导出 ${(result.results || []).length} 条${batchDetails ? `\n${batchDetails}` : ''}`);
     const exportDir = result.exportDir || state.materialFolders?.unifiedExportDir || '';
     notify(`${runLabel}完成：已导出 ${(result.results || []).length} 条\n导出目录：${exportDir}`);
   } catch (error) {
@@ -1042,20 +1407,6 @@ async function runBatchRender(batchId, tasksToRender, runLabel = '批量合成')
 
 async function startBatchAll(batchId) {
   if (!batchId) return;
-  // One-click run auto-confirms style/subtitle state for the whole batch.
-  if (getBatchTasks(batchId).some((task) => !task.subtitleConfirmed)) {
-    const tasks = state.tasks.map((task) =>
-      task.batchId === batchId
-        ? {
-            ...task,
-            subtitleConfirmed: true,
-            updatedAt: new Date().toISOString(),
-          }
-        : task,
-    );
-    setState({ tasks });
-    addOperationLog('批量自动确认', `${batchId} 一键开始时自动确认样式`);
-  }
   let batchTasks = getBatchTasks(batchId);
   addOperationLog('批量开始', `${batchId} 开始自动执行`);
   await generateBatchAudio(batchId, { force: false });
@@ -1066,6 +1417,12 @@ async function startBatchAll(batchId) {
     notify(`批量终止：还有 ${pendingAudio.length} 条音频未成功生成。`);
     return;
   }
+  const pendingConfirm = batchTasks.filter((task) => !task.subtitleConfirmed);
+  if (pendingConfirm.length) {
+    addOperationLog('批量等待确认', `${batchId} 仍有 ${pendingConfirm.length} 条字幕/标题样式未确认`);
+    notify(`音频已生成，但还有 ${pendingConfirm.length} 条未确认字幕和标题样式。请先确认，再继续导出。`);
+    return;
+  }
   await runBatchRender(batchId, batchTasks, '批量一键执行');
 }
 
@@ -1073,10 +1430,10 @@ async function continueBatchCompose(batchId) {
   if (!batchId) return;
   const batchTasks = getBatchTasks(batchId);
   const targets = batchTasks.filter(
-    (task) => task.audioStatus === '已生成' && task.audioUrl && task.videoStatus !== '已合成',
+    (task) => task.audioStatus === '已生成' && task.audioUrl && task.videoStatus !== '已合成' && task.subtitleConfirmed,
   );
   if (!targets.length) {
-    notify('没有可继续合并的任务（需已生成音频且未合成）。');
+    notify('没有可继续合并的任务（需已生成音频、已确认字幕样式且未合成）。');
     return;
   }
   addOperationLog('继续合并', `${batchId} 仅重试视频合成 ${targets.length} 条`);
@@ -1129,13 +1486,14 @@ function updateTaskStyle(taskId, target, key, value) {
   const tasks = state.tasks.map((task) => {
     if (task.id !== taskId) return task;
     const styleKey = target === 'title' ? 'titleStyle' : 'subtitleStyle';
-    const nextValue = key === 'color' ? value : Number(value);
+    const nextValue = key === 'color' || key === 'shadowColor' ? value : Number(value);
     return {
       ...task,
       [styleKey]: {
         ...task[styleKey],
         [key]: nextValue,
       },
+      subtitleConfirmed: false,
       updatedAt: new Date().toISOString(),
     };
   });
@@ -1150,6 +1508,7 @@ function updateTitleHold(taskId, value) {
       ? {
           ...task,
           titleHold: next,
+          subtitleConfirmed: false,
           updatedAt: new Date().toISOString(),
         }
       : task,
@@ -1197,6 +1556,7 @@ function startDrag(event, taskId, target) {
           y: lastY,
           width: lastWidth,
         },
+        subtitleConfirmed: false,
         updatedAt: new Date().toISOString(),
       };
     });
@@ -1242,21 +1602,49 @@ function formatTime(value) {
   return `${y}/${m}/${d} ${hh}:${mm}:${ss}`;
 }
 
+function getTaskSubtitleText(task) {
+  const text = String(task?.subtitleText || task?.body || '').trim();
+  return text || '字幕预览文字';
+}
+
+function formatSegmentDetails(segmentDetails = []) {
+  return (segmentDetails || [])
+    .filter((item) => item && (item.poolLabel || item.sourceMaterial))
+    .map((item) => {
+      const pool = String(item.poolLabel || item.poolKey || '').trim();
+      const source = String(item.sourceMaterial || '').trim();
+      const duration = Number(item.clipDuration || 0);
+      const durationText = duration > 0 ? `${duration.toFixed(1)}s` : '';
+      return [pool, source, durationText].filter(Boolean).join(' ');
+    })
+    .join(' / ');
+}
+
 function render() {
-  const activeTask = state.tasks.find((task) => task.id === state.activeTaskId) || state.tasks[0] || null;
+  const currentProject = getCurrentProjectMeta();
+  const projectTasks = getProjectTasks();
+  const activeTask = projectTasks.find((task) => task.id === state.activeTaskId) || projectTasks[0] || null;
   document.querySelector('#app').innerHTML = `
     <div class="shell">
       <aside class="sidebar">
         <div class="brand">
           <span class="brand-mark">片</span>
           <div>
-            <strong>小片场</strong>
+            <strong>让更多人看到你</strong>
             <small>本地短视频工作台</small>
           </div>
         </div>
-        ${renderNav('audio', '音频工作台')}
+        <div class="project-switch">
+          <button class="project-pill ${state.projectType === 'waidan' ? 'active' : ''}" data-project-type="waidan" type="button">外单项目</button>
+          <button class="project-pill ${state.projectType === 'kitchen' ? 'active' : ''}" data-project-type="kitchen" type="button">二手厨具</button>
+        </div>
+        <div class="project-note">
+          <strong>${currentProject.label}</strong>
+          <small>${currentProject.note}</small>
+        </div>
+        ${renderNav('audio', '单条-生成音频')}
         ${renderNav('batch', '批量制作')}
-        ${renderNav('compose', '视频合成')}
+        ${renderNav('compose', '单条-合成视频')}
         ${renderNav('materials', '素材库')}
         ${renderNav('logs', '操作记录')}
         <div class="local-note">本地模式。批次号和编号自动生成。</div>
@@ -1266,7 +1654,7 @@ function render() {
         <header class="topbar">
           <div>
             <p class="eyebrow">清晰流程</p>
-            <h1>文案上传 → 生成音频 → 合成最终视频</h1>
+            <h1>${currentProject.label} · 文案上传 → 生成音频 → 字幕校对 → 合成最终视频</h1>
           </div>
           <div class="service-pills">
             <span>默认样式</span>
@@ -1308,7 +1696,8 @@ function renderVideoModal() {
 }
 
 function renderAudioWorkbench(activeTask) {
-  const taskOptions = state.tasks.map((task) =>
+  const projectTasks = getProjectTasks();
+  const taskOptions = projectTasks.map((task) =>
     `<option value="${task.id}" ${activeTask?.id === task.id ? 'selected' : ''}>#${task.itemNumber} ${escapeHtml(task.title)}</option>`,
   ).join('');
   const voiceOptions = state.voices.map((voice) =>
@@ -1362,7 +1751,7 @@ function renderAudioWorkbench(activeTask) {
         <section class="panel">
           <p class="eyebrow">第三步</p>
           <h2>生成音频</h2>
-          ${state.tasks.length ? `
+          ${projectTasks.length ? `
             <div class="compact-audio-grid">
               <div>
                 <label>选择文案
@@ -1386,11 +1775,12 @@ function renderAudioWorkbench(activeTask) {
               <div class="audio-status-box">
                 <strong>音频状态：${activeTask?.audioStatus || '-'}</strong>
                 <small>任务：${activeTask ? `#${activeTask.itemNumber}` : '-'}</small>
-                ${activeTask?.audioUrl ? `<audio controls src="${activeTask.audioUrl}" style="width:100%;margin-top:8px;"></audio>` : ''}
+                ${activeTask?.audioUrl ? renderAudioPreview(activeTask.audioUrl) : ''}
+                ${activeTask?.audioStatus === '已生成' ? `<button class="soft" data-view="compose" type="button">去单条-合成视频</button>` : ''}
                 ${activeTask?.statusReason ? `<small class="log-error-text">原因：${escapeHtml(activeTask.statusReason)}</small>` : ''}
               </div>
             </div>
-          ` : renderEmpty('先上传文案')}
+          ` : renderKitchenEmptyBridge(`先在${getProjectTypeLabel()}里上传文案`)}
         </section>
       </div>
       <div class="audio-right">
@@ -1401,7 +1791,7 @@ function renderAudioWorkbench(activeTask) {
 }
 
 function renderTaskBoard(activeTask) {
-  const tasks = state.tasks || [];
+  const tasks = getProjectTasks();
   const doneAudio = tasks.filter((task) => task.audioStatus === '已生成');
   const pendingAudio = tasks.filter((task) => task.audioStatus !== '已生成');
   const failedCount = tasks.filter((task) => String(task.status).includes('失败')).length;
@@ -1436,7 +1826,7 @@ function renderTaskBoard(activeTask) {
       ${activeTask ? `
         <div class="audio-status-box">
           <strong>#${activeTask.itemNumber} ${escapeHtml(activeTask.title)}</strong>
-          ${activeTask.audioUrl ? `<audio controls src="${activeTask.audioUrl}" style="width:100%;margin-top:8px;"></audio>` : ''}
+          ${activeTask.audioUrl ? renderAudioPreview(activeTask.audioUrl) : ''}
         </div>
       ` : ''}
       <div class="record-table">
@@ -1468,7 +1858,8 @@ function renderNoticeModal() {
 }
 
 function renderBatchWorkbench(activeTask) {
-  const batchIds = [...new Set(state.tasks.map((task) => task.batchId).filter(Boolean))];
+  const projectTasks = getProjectTasks();
+  const batchIds = [...new Set(projectTasks.map((task) => task.batchId).filter(Boolean))];
   const activeBatchId = activeTask?.batchId || batchIds[0] || '';
   const batchTasks = getBatchTasks(activeBatchId);
   const isBatchRunning = state.batchProcessingBatchId === activeBatchId;
@@ -1518,7 +1909,8 @@ function renderBatchWorkbench(activeTask) {
       <div class="batch-left">
       <div class="panel batch-list-panel">
         <p class="eyebrow">批量制作</p>
-        <h2>上传批量文案后，确认样式，一键自动跑完</h2>
+        <h2>上传批量文案后，先生成音频，再确认字幕样式，最后导出</h2>
+        ${renderKitchenConfigPanel('batch')}
         <div class="batch-upload-row">
           <label class="batch-upload-compact">
             <input id="batchExcelInput" type="file" accept=".xlsx,.xls,.csv" />
@@ -1573,15 +1965,17 @@ function renderBatchWorkbench(activeTask) {
             <button class="soft" type="button" data-apply-batch-style="${activeBatchId}" data-style-source="${batchActiveTask?.id || ''}">套用当前标题/字幕样式</button>
             <button class="soft" type="button" data-confirm-batch-subtitles="${activeBatchId}">确认标题和字幕样式</button>
             <button class="soft" type="button" data-continue-batch-compose="${activeBatchId}">继续合并（不重生音频）</button>
-            <button class="primary" type="button" data-start-batch-all="${activeBatchId}">一键开始：生成音频并导出</button>
+            <button class="primary" type="button" data-start-batch-all="${activeBatchId}">一键开始：先生成音频</button>
           </div>
           ${isBatchRunning ? '<p class="batch-running-tip">右侧正在合成中，请等待本轮结果。</p>' : ''}
-        ` : renderEmpty('先上传批量文案 Excel')}
+        ` : renderKitchenEmptyBridge('先上传批量文案 Excel')}
       </div>
       <div class="panel batch-preview-panel">
         <p class="eyebrow">字幕和标题预览</p>
-        <h2>先点左侧任务，确认字幕位置和标题时长</h2>
-        ${batchActiveTask ? renderComposePreview(batchActiveTask) : renderEmpty(doneVideo ? '当前批次都已合成，请在过往记录查看。' : '先导入批量文案')}
+        <h2>这个批次的任务逐条确认字幕位置和标题时长</h2>
+        ${batchActiveTask ? renderBatchSubtitleNavigator(batchTasks, batchActiveTask) : ''}
+        ${batchActiveTask ? renderSubtitleEditorPanel(batchActiveTask, batchActiveTask.subtitleConfirmed ? '重新确认当前字幕' : '确认当前字幕') : ''}
+        ${batchActiveTask ? renderComposePreview(batchActiveTask) : renderKitchenEmptyBridge(doneVideo ? '当前批次都已合成，请在过往记录查看。' : '先导入批量文案')}
       </div>
       </div>
       <div class="panel batch-records-panel">
@@ -1640,7 +2034,8 @@ function renderOverview(activeTask) {
     <section class="flow-strip">
       ${renderFlowStep('1', '文案上传', '复制粘贴或 Excel 上传。每条必须有标题和正文。')}
       ${renderFlowStep('2', '文案生成音频', 'MiniMax 用默认粤语生成配音。')}
-      ${renderFlowStep('3', '音频结合视频', '匹配未使用素材，生成带标题和字幕的视频。')}
+      ${renderFlowStep('3', '字幕校对确认', '生成音频后先检查字幕文字、标题时长和位置。')}
+      ${renderFlowStep('4', '音频结合视频', '匹配未使用素材，生成带标题和字幕的视频。')}
     </section>
     <section class="dashboard-grid">
       <div class="panel task-list">
@@ -1844,22 +2239,189 @@ function renderAudio(activeTask) {
       </div>
       <div class="panel audio-result-panel">
         <p class="eyebrow">音频状态</p>
-        <h2>不在这里显示复杂进度</h2>
+        <h2>生成后先确认字幕</h2>
         ${activeTask ? `
           <div class="asset-grid compact-assets">
             <div><span>音频</span><strong>${activeTask.audioStatus}</strong></div>
             <div><span>当前声音</span><strong>${escapeHtml(getVoiceName(activeTask.selectedVoiceId))}</strong></div>
             <div><span>语言</span><strong>${languageName(activeTask.language)}</strong></div>
+            <div><span>字幕确认</span><strong>${activeTask.subtitleConfirmed ? '已确认' : '待确认'}</strong></div>
           </div>
-          ${activeTask.audioUrl ? `<audio controls src="${activeTask.audioUrl}" style="margin-top:12px;width:100%;"></audio>` : ''}
+          ${activeTask.audioUrl ? renderAudioPreview(activeTask.audioUrl) : ''}
+          ${activeTask.audioStatus === '已生成' ? `
+            <p class="hint">音频出来后，先去视频合成页看预览，再确认标题和字幕样式。</p>
+            <div class="material-actions">
+              <button class="soft" data-view="subtitle" type="button">去确认字幕样式</button>
+              <button class="primary" data-confirm-task-subtitle="${activeTask.id}" type="button">直接确认这条字幕</button>
+            </div>
+          ` : ''}
         ` : renderEmpty('暂无任务')}
       </div>
     </section>
   `;
 }
 
+function renderSubtitleEditorPanel(task, confirmLabel = '确认单条字幕', options = {}) {
+  const open = options.open ?? isSubtitleEditorOpen(task?.id, true);
+  if (!task) return '';
+  if (task.audioStatus !== '已生成' || !task.audioUrl) {
+    return `
+      <details class="panel subtitle-edit-fold" data-subtitle-fold-task="${task.id}" ${open ? 'open' : ''}>
+        <summary>展开/收起字幕修改框</summary>
+        <div class="subtitle-edit-card">
+          <div class="panel-heading subtitle-edit-head">
+            <div>
+              <p class="eyebrow">文字校对</p>
+              <h3>#${task.itemNumber} ${escapeHtml(task.title)}</h3>
+            </div>
+          </div>
+          <p class="hint">这条任务还没生成音频。先生成音频，生成后就在这里直接修改字幕、查找替换并确认。</p>
+          <div class="subtitle-status-row">
+            <span>音频：${task.audioStatus}</span>
+            <span>字幕确认：${task.subtitleConfirmed ? '已确认' : '待确认'}</span>
+            <span>视频：${task.videoStatus}</span>
+          </div>
+        </div>
+      </details>
+    `;
+  }
+  return `
+    <details class="panel subtitle-edit-fold" data-subtitle-fold-task="${task.id}" ${open ? 'open' : ''}>
+      <summary>展开/收起字幕修改框</summary>
+      <div class="subtitle-edit-card">
+        <div class="panel-heading subtitle-edit-head">
+          <div>
+            <p class="eyebrow">文字校对</p>
+            <h3>#${task.itemNumber} ${escapeHtml(task.title)}</h3>
+          </div>
+          <button class="primary" data-confirm-task-subtitle="${task.id}" type="button">${confirmLabel}</button>
+        </div>
+        ${renderAudioPreview(task.audioUrl)}
+        <label>文字校对
+          <textarea class="subtitle-editor" data-subtitle-text-task="${task.id}" placeholder="这里可以直接修改字幕文字">${escapeHtml(getTaskSubtitleText(task))}</textarea>
+        </label>
+        <div class="subtitle-replace-grid">
+          <label>查找
+            <input type="text" data-subtitle-find="${task.id}" placeholder="输入错别字" />
+          </label>
+          <label>替换成
+            <input type="text" data-subtitle-replace="${task.id}" placeholder="输入正确词" />
+          </label>
+          <div class="subtitle-replace-actions">
+            <button class="soft" data-replace-task-subtitle="${task.id}" type="button">替换当前整段</button>
+            <button class="soft" data-remember-task-subtitle="${task.id}" type="button">记住</button>
+          </div>
+        </div>
+        <div class="subtitle-status-row">
+          <span>音频：${task.audioStatus}</span>
+          <span>字幕确认：${task.subtitleConfirmed ? '已确认' : '待确认'}</span>
+          <span>视频：${task.videoStatus}</span>
+        </div>
+      </div>
+    </details>
+  `;
+}
+
+function renderBatchSubtitleNavigator(tasks, activeTask) {
+  if (!tasks.length || !activeTask) return '';
+  const index = tasks.findIndex((task) => task.id === activeTask.id);
+  const prev = index > 0 ? tasks[index - 1] : null;
+  const next = index >= 0 && index < tasks.length - 1 ? tasks[index + 1] : null;
+  return `
+    <div class="batch-subtitle-nav">
+      <span>当前第 ${index + 1} 条 / 共 ${tasks.length} 条</span>
+      <div class="batch-subtitle-nav-actions">
+        <button class="soft" type="button" ${prev ? `data-pick-task="${prev.id}" data-pick-view="batch"` : 'disabled'}>上一条</button>
+        <button class="soft" type="button" ${next ? `data-pick-task="${next.id}" data-pick-view="batch"` : 'disabled'}>下一条</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderSubtitleWorkbench(activeTask) {
+  const subtitleTasks = getProjectTasks().filter((task) => task.audioStatus === '已生成' && task.audioUrl);
+  const subtitleTask = subtitleTasks.find((task) => task.id === activeTask?.id) || subtitleTasks[0] || null;
+  const options = subtitleTasks.map((task) =>
+    `<option value="${task.id}" ${subtitleTask?.id === task.id ? 'selected' : ''}>#${task.itemNumber} ${escapeHtml(task.title)}</option>`,
+  ).join('');
+  return `
+    <section class="subtitle-shell">
+      <div class="subtitle-left">
+        <section class="panel">
+          <p class="eyebrow">单条合成视频</p>
+          <h2>文字校对与预览</h2>
+          ${subtitleTask ? `
+            <label>选择音频
+              <select data-select-task="subtitle">
+                ${options}
+              </select>
+            </label>
+          ` : ''}
+        </section>
+        ${subtitleTask ? `
+          <details class="panel subtitle-edit-fold" open>
+            <summary>展开/收起字幕修改框</summary>
+            <div class="subtitle-edit-card">
+              <div class="panel-heading subtitle-edit-head">
+                <div>
+                  <p class="eyebrow">文字校对</p>
+                  <h3>#${subtitleTask.itemNumber} ${escapeHtml(subtitleTask.title)}</h3>
+                </div>
+                <button class="primary" data-confirm-task-subtitle="${subtitleTask.id}" type="button">确认单条字幕</button>
+              </div>
+              ${renderAudioPreview(subtitleTask.audioUrl)}
+              <label>文字校对
+                <textarea class="subtitle-editor" data-subtitle-text-task="${subtitleTask.id}" placeholder="这里可以直接修改字幕文字">${escapeHtml(getTaskSubtitleText(subtitleTask))}</textarea>
+              </label>
+              <div class="subtitle-replace-grid">
+                <label>查找
+                  <input type="text" data-subtitle-find="${subtitleTask.id}" placeholder="输入错别字" />
+                </label>
+                <label>替换成
+                  <input type="text" data-subtitle-replace="${subtitleTask.id}" placeholder="输入正确词" />
+                </label>
+                <div class="subtitle-replace-actions">
+                  <button class="soft" data-replace-task-subtitle="${subtitleTask.id}" type="button">替换当前整段</button>
+                  <button class="soft" data-remember-task-subtitle="${subtitleTask.id}" type="button">记住</button>
+                </div>
+              </div>
+              <div class="subtitle-status-row">
+                <span>音频：${subtitleTask.audioStatus}</span>
+                <span>字幕确认：${subtitleTask.subtitleConfirmed ? '已确认' : '待确认'}</span>
+                <span>视频：${subtitleTask.videoStatus}</span>
+              </div>
+            </div>
+          </details>
+          <section class="panel subtitle-preview-panel">
+            <p class="eyebrow">待合成</p>
+            <h2>先校对字幕，再去视频合成</h2>
+            ${renderComposePreview(subtitleTask)}
+          </section>
+        ` : renderKitchenEmptyBridge('请先生成音频，再来校对字幕。')}
+      </div>
+      <div class="subtitle-right">
+        <section class="panel">
+          <p class="eyebrow">待合成列表</p>
+          <h2>全局字幕修改会直接影响后续合成</h2>
+          ${subtitleTasks.length ? renderTaskPicker('subtitle', subtitleTasks, subtitleTask, '暂无可校对字幕') : renderEmpty('请先生成音频，再来校对字幕。')}
+        </section>
+        <section class="panel">
+          <p class="eyebrow">校对提醒</p>
+          <h2>这一步是全局生效的</h2>
+          <div class="subtitle-chip-list">
+            <span class="subtitle-quick-chip">猛火照 → 猛火灶</span>
+            <span class="subtitle-quick-chip">蒸反车 → 蒸饭车</span>
+            <span class="subtitle-quick-chip">不秀钢 → 不锈钢</span>
+          </div>
+          <p class="hint">你在这里改的字幕文字，会同步用于单条和批量的后续视频合成。</p>
+        </section>
+      </div>
+    </section>
+  `;
+}
+
 function renderCompose(activeTask) {
-  const audioTasks = state.tasks.filter((task) => task.audioStatus === '已生成');
+  const audioTasks = getProjectTasks().filter((task) => task.audioStatus === '已生成');
   const composeTask = audioTasks.find((task) => task.id === activeTask?.id) || audioTasks[0] || null;
   const options = audioTasks.map((task) =>
     `<option value="${task.id}" ${composeTask?.id === task.id ? 'selected' : ''}>#${task.itemNumber} ${escapeHtml(task.title)}</option>`,
@@ -1869,6 +2431,7 @@ function renderCompose(activeTask) {
       <div class="panel compose-mid-panel">
         <p class="eyebrow">视频合成</p>
         <h2>中间操作区</h2>
+        ${renderKitchenConfigPanel('compose')}
         ${composeTask ? `
           <label>选择音频
             <select data-select-task="compose">
@@ -1876,16 +2439,23 @@ function renderCompose(activeTask) {
             </select>
           </label>
           <div class="compact-status-line">
-            <strong>${composeTask.status}</strong>            
+            <strong>${composeTask.status}</strong>
           </div>
-          <p class="hint">选好音频后直接点“一键自动合成”，自动匹配素材并导出成片。</p>
+          <p class="hint">${composeTask.subtitleConfirmed ? '字幕和标题样式已确认，现在可以开始自动合成。' : '先在下面预览区确认标题和字幕样式，确认后再开始自动合成。'}</p>
+          <div class="asset-grid compact-assets">
+            <div><span>音频</span><strong>${composeTask.audioStatus}</strong></div>
+            <div><span>字幕确认</span><strong>${composeTask.subtitleConfirmed ? '已确认' : '待确认'}</strong></div>
+            <div><span>视频</span><strong>${composeTask.videoStatus}</strong></div>
+          </div>
+          <button class="${composeTask.subtitleConfirmed ? 'soft' : 'primary'}" data-confirm-task-subtitle="${composeTask.id}" type="button">${composeTask.subtitleConfirmed ? '重新确认标题和字幕样式' : '确认标题和字幕样式'}</button>
           <button class="primary" data-compose-video="${composeTask.id}">一键自动合成</button>
           <button class="soft" data-rematch-material="${composeTask.id}">仅重匹配素材</button>
           <button class="soft" data-grab-frame="${composeTask.id}">仅抓首帧</button>
           <button class="soft" data-retry-task="${composeTask.id}">重试</button>
           <button class="danger" data-remove-task="${composeTask.id}">删除</button>
           <button class="soft" data-view="materials">素材库</button>
-        ` : renderEmpty('请先上传文案并生成音频。')}
+        ` : renderKitchenEmptyBridge('请先上传文案并生成音频。')}
+        ${composeTask ? renderSubtitleEditorPanel(composeTask, composeTask.subtitleConfirmed ? '重新确认单条字幕' : '确认单条字幕') : ''}
         ${renderComposePreview(composeTask)}
       </div>
       <details class="panel compose-right-panel" open>
@@ -1909,6 +2479,10 @@ function renderComposeProgress(task) {
 }
 
 function renderTaskPicker(view, tasks, activeTask, emptyText) {
+  const statusText = (task) => {
+    if (view === 'subtitle') return task.subtitleConfirmed ? '已确认' : '待确认';
+    return view === 'audio' ? task.status : '可合成';
+  };
   return `
     <div class="picker-list">
       ${tasks.length ? tasks.map((task) => `
@@ -1917,7 +2491,7 @@ function renderTaskPicker(view, tasks, activeTask, emptyText) {
             <strong>${escapeHtml(task.title)}</strong>
             <small>${task.batchId} / ${task.itemNumber}</small>
           </span>
-          <span class="status ${statusClass(task.status)}">${view === 'audio' ? task.status : '可合成'}</span>
+          <span class="status ${statusClass(statusText(task))}">${statusText(task)}</span>
         </button>
       `).join('') : renderEmpty(emptyText)}
     </div>
@@ -1925,7 +2499,7 @@ function renderTaskPicker(view, tasks, activeTask, emptyText) {
 }
 
 function renderInlineComposeRecords(activeTask) {
-  const composeTasks = state.tasks.filter((task) => task.audioStatus === '已生成');
+  const composeTasks = getProjectTasks().filter((task) => task.audioStatus === '已生成');
   const totalDone = composeTasks.filter((task) => task.videoStatus === '已合成' || String(task.status).includes('成功')).length;
   const running = composeTasks.filter((task) => String(task.status).includes('处理')).length;
   const pending = composeTasks.filter((task) => String(task.status).includes('待')).length;
@@ -1973,12 +2547,12 @@ function renderComposePreview(task) {
   if (!task) {
     return `
       <div class="compose-preview-empty">
-        <span>暂无任务</span>
+        <span>${state.projectType === 'kitchen' ? '先导入厨具任务或在厨具项目里生成音频' : '暂无任务'}</span>
       </div>
     `;
   }
 
-  const subtitleSource = previewSubtitleSample(task.body || '字幕预览文字');
+  const subtitleSource = previewSubtitleSample(getTaskSubtitleText(task));
   const titleLayout = layoutPreviewOverlayText(task.title || '', task.titleStyle?.size, 'title', 2, task.titleStyle?.width);
   const subtitleLayout = layoutPreviewOverlayText(subtitleSource, task.subtitleStyle?.size, 'subtitle', 1, task.subtitleStyle?.width);
 
@@ -1993,7 +2567,7 @@ function renderComposePreview(task) {
           data-x="${task.titleStyle.x}"
           data-y="${task.titleStyle.y}"
           data-width="${task.titleStyle.width || 72}"
-          style="left:${task.titleStyle.x}%; top:${task.titleStyle.y}%; width:${task.titleStyle.width || 72}%; color:${task.titleStyle.color}; font-size:${titleLayout.previewSize}px;"
+          style="left:${task.titleStyle.x}%; top:${task.titleStyle.y}%; width:${task.titleStyle.width || 72}%; color:${task.titleStyle.color}; font-size:${titleLayout.previewSize}px; text-shadow: 0 2px 8px ${task.titleStyle.shadowColor || '#000000'};"
         ><span class="resize-handle left" data-resize-edge="left"></span><span class="preview-text">${escapeHtml(titleLayout.text)}</span><span class="resize-handle right" data-resize-edge="right"></span></button>
         <button
           class="preview-subtitle"
@@ -2023,15 +2597,19 @@ function renderStyleControl(task, target, label, style) {
   return `
     <div class="style-card">
       <h3>${label}调整</h3>
-      <label>颜色<input type="color" value="${style.color}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="color" /></label>
-      <label>大小<input type="range" min="18" max="96" value="${style.size}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="size" /></label>
-      <label>边框宽度<input type="range" min="24" max="96" value="${style.width || 72}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="width" /></label>
-      <label>左右位置<input type="range" min="5" max="95" value="${style.x}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="x" /></label>
-      <label>上下位置<input type="range" min="5" max="95" value="${style.y}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="y" /></label>
+      <label class="style-row"><span class="style-label">颜色</span><span class="style-control"><input type="color" value="${style.color}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="color" /></span></label>
+      ${target === 'title' ? `<label class="style-row"><span class="style-label">阴影颜色</span><span class="style-control"><input type="color" value="${style.shadowColor || '#000000'}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="shadowColor" /></span></label>` : ''}
+      <label class="style-row"><span class="style-label">大小</span><span class="style-control"><input type="range" min="18" max="96" value="${style.size}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="size" /></span></label>
+      <label class="style-row"><span class="style-label">边框宽度</span><span class="style-control"><input type="range" min="24" max="96" value="${style.width || 72}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="width" /></span></label>
+      <label class="style-row"><span class="style-label">左右位置</span><span class="style-control"><input type="range" min="5" max="95" value="${style.x}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="x" /></span></label>
+      <label class="style-row"><span class="style-label">上下位置</span><span class="style-control"><input type="range" min="5" max="95" value="${style.y}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="y" /></span></label>
       ${target === 'title' ? `
-        <label>标题保留时长
-          <input type="range" min="0" max="3" step="1" value="${holdIndex}" data-title-hold-task="${task.id}" />
-          <small>${task.titleHold === 'always' ? '一直显示' : `${task.titleHold}s`}</small>
+        <label class="style-row">
+          <span class="style-label">标题保留时长</span>
+          <span class="style-control style-control-with-value">
+            <input type="range" min="0" max="3" step="1" value="${holdIndex}" data-title-hold-task="${task.id}" />
+            <small>${task.titleHold === 'always' ? '一直显示' : `${task.titleHold}s`}</small>
+          </span>
         </label>
       ` : ''}
     </div>
@@ -2040,11 +2618,41 @@ function renderStyleControl(task, target, label, style) {
 
 function renderMaterials() {
   const inventory = state.materialInventory || initialState.materialInventory;
+  const currentProject = getCurrentProjectMeta();
+  if (state.projectType === 'kitchen') {
+    const config = getKitchenConfig();
+    return `
+      <section class="materials-layout">
+        <div class="panel material-form">
+          <p class="eyebrow">素材库</p>
+          <h2>${currentProject.shortLabel}素材库</h2>
+          <p class="warning">硬规则：每条成片都要从外场、航拍、仓库内部三个池子的可用素材里按比例截取，已用素材绝对不复用。</p>
+          <div class="folder-list">
+            <div><span>外场可用</span><strong>${escapeHtml(config.pools.outdoor.unusedDir)}</strong></div>
+            <div><span>航拍可用</span><strong>${escapeHtml(config.pools.aerial.unusedDir)}</strong></div>
+            <div><span>仓库可用</span><strong>${escapeHtml(config.pools.warehouse.unusedDir)}</strong></div>
+          </div>
+          <p class="hint">合成时会优先从各池的可用素材截取；可用时长不够时才会继续检查对应池的残片素材。</p>
+          <div class="material-actions">
+            <button class="primary" data-refresh-materials="true">刷新素材统计</button>
+            <button class="soft" data-init-materials="true">一键创建并扫描</button>
+          </div>
+          <code class="command-code">本地一键执行，不需要复制命令</code>
+          <small class="scan-time">最近扫描：${inventory.updatedAt || '尚未扫描'}</small>
+        </div>
+        <div class="material-columns">
+          ${renderKitchenInventoryPanel(config.pools.outdoor.label || '外场', inventory.kitchen?.outdoor)}
+          ${renderKitchenInventoryPanel(config.pools.aerial.label || '航拍', inventory.kitchen?.aerial)}
+          ${renderKitchenInventoryPanel(config.pools.warehouse.label || '仓库内部', inventory.kitchen?.warehouse)}
+        </div>
+      </section>
+    `;
+  }
   return `
     <section class="materials-layout">
       <div class="panel material-form">
         <p class="eyebrow">素材库</p>
-        <h2>按文件夹自动抓取</h2>
+        <h2>${currentProject.shortLabel}素材库</h2>
         <p class="warning">硬规则：已经使用的视频素材绝对不复用。</p>
         <div class="folder-list">
           <div><span>未用素材</span><strong>local_materials/unused</strong></div>
@@ -2068,10 +2676,24 @@ function renderMaterials() {
   `;
 }
 
-function renderInventoryColumn(title, kind, bucket = { count: 0, totalDuration: 0, files: [] }) {
+function renderKitchenInventoryPanel(title, poolInventory = {}) {
+  const unused = poolInventory.unused || createEmptyInventoryBucket();
+  const fragments = poolInventory.fragments || createEmptyInventoryBucket();
+  const used = poolInventory.used || createEmptyInventoryBucket();
   return `
     <div class="panel material-column">
       <h3>${title}</h3>
+      ${renderInventoryColumn('可用', 'unused', unused)}
+      ${renderInventoryColumn('残片', 'fragments', fragments)}
+      ${renderInventoryColumn('已用', 'used', used)}
+    </div>
+  `;
+}
+
+function renderInventoryColumn(title, kind, bucket = { count: 0, totalDuration: 0, files: [] }) {
+  return `
+    <div class="panel material-column material-status-block">
+      <h4>${title}</h4>
       <div class="material-summary">
         <div><span>文件数</span><strong>${bucket.count || 0}</strong></div>
         <div><span>分类时长</span><strong>${bucket.totalDuration ? formatSeconds(bucket.totalDuration) : '00:00'}</strong></div>
@@ -2147,6 +2769,16 @@ function renderEmpty(text) {
 function bindEvents() {
   document.querySelectorAll('[data-view]').forEach((button) => {
     button.addEventListener('click', () => setState({ activeView: button.dataset.view }));
+  });
+  document.querySelectorAll('[data-project-type]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const projectType = button.dataset.projectType === 'kitchen' ? 'kitchen' : 'waidan';
+      const firstTask = getProjectTasks(projectType)[0] || null;
+      setState({
+        projectType,
+        activeTaskId: firstTask?.id || null,
+      });
+    });
   });
   document.querySelectorAll('[data-task]').forEach((button) => {
     button.addEventListener('click', () => selectTask(button.dataset.task));
@@ -2238,6 +2870,22 @@ function bindEvents() {
   document.querySelectorAll('[data-confirm-batch-subtitles]').forEach((button) => {
     button.addEventListener('click', () => confirmBatchSubtitles(button.dataset.confirmBatchSubtitles));
   });
+  document.querySelectorAll('[data-confirm-task-subtitle]').forEach((button) => {
+    button.addEventListener('click', () => confirmTaskSubtitle(button.dataset.confirmTaskSubtitle));
+  });
+  document.querySelectorAll('[data-subtitle-text-task]').forEach((textarea) => {
+    textarea.addEventListener('change', () => updateTaskSubtitleText(textarea.dataset.subtitleTextTask, textarea.value));
+    textarea.addEventListener('blur', () => updateTaskSubtitleText(textarea.dataset.subtitleTextTask, textarea.value));
+  });
+  document.querySelectorAll('[data-subtitle-fold-task]').forEach((details) => {
+    details.addEventListener('toggle', () => setSubtitleEditorOpen(details.dataset.subtitleFoldTask, details.open));
+  });
+  document.querySelectorAll('[data-replace-task-subtitle]').forEach((button) => {
+    button.addEventListener('click', () => replaceTaskSubtitle(button.dataset.replaceTaskSubtitle, true));
+  });
+  document.querySelectorAll('[data-remember-task-subtitle]').forEach((button) => {
+    button.addEventListener('click', () => rememberTaskSubtitle(button.dataset.rememberTaskSubtitle));
+  });
   document.querySelectorAll('[data-continue-batch-compose]').forEach((button) => {
     button.addEventListener('click', () => continueBatchCompose(button.dataset.continueBatchCompose));
   });
@@ -2249,6 +2897,12 @@ function bindEvents() {
   });
   document.querySelectorAll('[data-start-batch-all]').forEach((button) => {
     button.addEventListener('click', () => startBatchAll(button.dataset.startBatchAll));
+  });
+  document.querySelectorAll('[data-kitchen-ratio]').forEach((input) => {
+    input.addEventListener('input', () => updateKitchenRatio(input.dataset.kitchenRatio, input.value));
+  });
+  document.querySelectorAll('[data-kitchen-threshold]').forEach((input) => {
+    input.addEventListener('input', () => updateKitchenFragmentThreshold(input.value));
   });
   document.querySelector('#voiceForm')?.addEventListener('submit', addVoice);
   document.querySelectorAll('[data-delete-voice]').forEach((button) => {
@@ -2419,6 +3073,15 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+}
+
+function renderAudioPreview(audioUrl) {
+  const safeUrl = normalizeAudioUrl(audioUrl);
+  if (!safeUrl) return '';
+  return `
+    <audio controls preload="metadata" src="${safeUrl}" style="width:100%;margin-top:8px;"></audio>
+    <div class="inline-link-row"><a href="${safeUrl}" target="_blank" rel="noopener noreferrer">打开音频</a></div>
+  `;
 }
 
 render();
