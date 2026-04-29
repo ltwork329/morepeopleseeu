@@ -1,14 +1,17 @@
 import { execFile } from 'node:child_process';
-import { mkdir, readdir, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ffprobeStatic from 'ffprobe-static';
+import { resolveMaterialRoot } from './material_root.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
-const materialRoot = path.join(root, 'local_materials');
+const materialRoot = resolveMaterialRoot(root);
 const publicRoot = path.join(root, 'public');
 const videoExts = new Set(['.mp4', '.mov', '.m4v', '.avi', '.mkv', '.webm']);
+const pendingDeleteMarkerSuffix = '.pending-delete.json';
 
 const buckets = {
   unused: path.join(materialRoot, 'unused'),
@@ -16,9 +19,48 @@ const buckets = {
   used: path.join(materialRoot, 'used'),
 };
 
+const kitchenPools = {
+  outdoor: {
+    label: '外场',
+    unused: path.join(materialRoot, 'kitchen', 'outdoor', 'unused'),
+    fragments: path.join(materialRoot, 'kitchen', 'outdoor', 'fragments'),
+    used: path.join(materialRoot, 'kitchen', 'outdoor', 'used'),
+  },
+  aerial: {
+    label: '航拍',
+    unused: path.join(materialRoot, 'kitchen', 'aerial', 'unused'),
+    fragments: path.join(materialRoot, 'kitchen', 'aerial', 'fragments'),
+    used: path.join(materialRoot, 'kitchen', 'aerial', 'used'),
+  },
+  warehouse: {
+    label: '仓库内部',
+    unused: path.join(materialRoot, 'kitchen', 'warehouse', 'unused'),
+    fragments: path.join(materialRoot, 'kitchen', 'warehouse', 'fragments'),
+    used: path.join(materialRoot, 'kitchen', 'warehouse', 'used'),
+  },
+};
+
+function getPendingDeleteMarkerPath(filePath) {
+  return `${filePath}${pendingDeleteMarkerSuffix}`;
+}
+
+async function shouldSkipPendingDeleteFile(filePath) {
+  const markerPath = getPendingDeleteMarkerPath(filePath);
+  if (!existsSync(markerPath)) return false;
+  if (!existsSync(filePath)) {
+    await rm(markerPath, { force: true }).catch(() => {});
+  }
+  return true;
+}
+
 async function ensureFolders() {
   await mkdir(publicRoot, { recursive: true });
   await Promise.all(Object.values(buckets).map((folder) => mkdir(folder, { recursive: true })));
+  for (const pool of Object.values(kitchenPools)) {
+    await Promise.all(
+      ['unused', 'fragments', 'used'].map((kind) => mkdir(pool[kind], { recursive: true })),
+    );
+  }
 }
 
 function probeDuration(filePath) {
@@ -48,6 +90,7 @@ async function scanBucket(folder) {
     const ext = path.extname(entry.name).toLowerCase();
     if (!videoExts.has(ext)) continue;
     const filePath = path.join(folder, entry.name);
+    if (await shouldSkipPendingDeleteFile(filePath)) continue;
     const duration = await probeDuration(filePath);
     files.push({
       name: entry.name,
@@ -63,6 +106,19 @@ async function scanBucket(folder) {
   };
 }
 
+async function scanKitchenPools() {
+  const result = {};
+  for (const [poolKey, pool] of Object.entries(kitchenPools)) {
+    result[poolKey] = {
+      label: pool.label,
+      unused: await scanBucket(pool.unused),
+      fragments: await scanBucket(pool.fragments),
+      used: await scanBucket(pool.used),
+    };
+  }
+  return result;
+}
+
 await ensureFolders();
 
 const inventory = {
@@ -71,6 +127,7 @@ const inventory = {
   unused: await scanBucket(buckets.unused),
   fragments: await scanBucket(buckets.fragments),
   used: await scanBucket(buckets.used),
+  kitchen: await scanKitchenPools(),
 };
 
 const json = `${JSON.stringify(inventory, null, 2)}\n`;

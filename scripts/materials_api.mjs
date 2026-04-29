@@ -1,27 +1,63 @@
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
 import { createReadStream, existsSync, statSync } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ffmpegPath from 'ffmpeg-static';
 import './load_local_env.mjs';
+import { resolveMaterialRoot } from './material_root.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
 const initScript = path.join(root, 'scripts', 'materials_init.mjs');
 const scanScript = path.join(root, 'scripts', 'scan_materials.mjs');
-const materialRoot = path.join(root, 'local_materials');
+const materialRoot = resolveMaterialRoot(root);
 const generatedAudioDir = path.join(root, 'public', 'generated_audio');
 const generatedVideoDir = path.join(root, 'public', 'generated_videos');
 const generatedSubtitleDir = path.join(root, 'public', 'generated_subtitles');
 const sourceBackupDir = path.join(materialRoot, 'source_backup');
+const pendingDeleteMarkerSuffix = '.pending-delete.json';
 const bucketDirs = {
   unused: path.join(materialRoot, 'unused'),
   fragments: path.join(materialRoot, 'fragments'),
   used: path.join(materialRoot, 'used'),
 };
+
+const defaultKitchenConfig = {
+  fragmentThreshold: 10,
+  orderMode: 'fixed',
+  ratios: {
+    outdoor: 50,
+    aerial: 25,
+    warehouse: 25,
+  },
+  pools: {
+    outdoor: {
+      label: '外场',
+      unusedDir: path.join(materialRoot, 'kitchen', 'outdoor', 'unused'),
+      fragmentsDir: path.join(materialRoot, 'kitchen', 'outdoor', 'fragments'),
+      usedDir: path.join(materialRoot, 'kitchen', 'outdoor', 'used'),
+    },
+    aerial: {
+      label: '航拍',
+      unusedDir: path.join(materialRoot, 'kitchen', 'aerial', 'unused'),
+      fragmentsDir: path.join(materialRoot, 'kitchen', 'aerial', 'fragments'),
+      usedDir: path.join(materialRoot, 'kitchen', 'aerial', 'used'),
+    },
+    warehouse: {
+      label: '仓库内部',
+      unusedDir: path.join(materialRoot, 'kitchen', 'warehouse', 'unused'),
+      fragmentsDir: path.join(materialRoot, 'kitchen', 'warehouse', 'fragments'),
+      usedDir: path.join(materialRoot, 'kitchen', 'warehouse', 'used'),
+    },
+  },
+};
+
+defaultKitchenConfig.pools.outdoor.label = '外场';
+defaultKitchenConfig.pools.aerial.label = '航拍';
+defaultKitchenConfig.pools.warehouse.label = '仓库内部';
 
 const host = '127.0.0.1';
 const port = 3210;
@@ -106,10 +142,158 @@ function buildFileUrl(fileName, bucketName) {
   return `http://${host}:${port}/api/materials/video?${params.toString()}`;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getPendingDeleteMarkerPath(filePath) {
+  return `${filePath}${pendingDeleteMarkerSuffix}`;
+}
+
+function isBusyMaterialError(error) {
+  const code = String(error?.code || '').toUpperCase();
+  const message = String(error?.message || '');
+  return code === 'EBUSY' || code === 'EPERM' || /resource busy or locked/i.test(message);
+}
+
+async function clearPendingDeleteMarker(filePath) {
+  await rm(getPendingDeleteMarkerPath(filePath), { force: true }).catch(() => {});
+}
+
+async function markPendingDelete(filePath, error) {
+  const markerPath = getPendingDeleteMarkerPath(filePath);
+  const payload = {
+    filePath,
+    fileName: path.basename(filePath),
+    createdAt: new Date().toISOString(),
+    reason: String(error?.message || error || 'resource busy or locked'),
+  };
+  await writeFile(markerPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+}
+
+async function shouldSkipPendingDeleteFile(filePath) {
+  const markerPath = getPendingDeleteMarkerPath(filePath);
+  if (!existsSync(markerPath)) return false;
+  if (!existsSync(filePath)) {
+    await clearPendingDeleteMarker(filePath);
+  }
+  return true;
+}
+
+async function removeFileWithRetry(filePath, {
+  attempts = 8,
+  baseDelayMs = 150,
+} = {}) {
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      await rm(filePath, { force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!isBusyMaterialError(error) || attempt === attempts - 1) {
+        throw error;
+      }
+      await sleep(baseDelayMs * (attempt + 1));
+    }
+  }
+  if (lastError) throw lastError;
+}
+
+async function archiveAndRemoveSourceMaterial(sourcePath, backupPath) {
+  await copyFile(sourcePath, backupPath);
+  try {
+    await removeFileWithRetry(sourcePath);
+    await clearPendingDeleteMarker(sourcePath);
+    return {
+      cleanupDeferred: false,
+      cleanupWarning: '',
+    };
+  } catch (error) {
+    if (!isBusyMaterialError(error)) throw error;
+    await markPendingDelete(sourcePath, error);
+    return {
+      cleanupDeferred: true,
+      cleanupWarning: `源素材暂时被其他程序占用，已标记为待清理并从候选池排除：${sourcePath}`,
+    };
+  }
+}
+
+function buildGeneratedAudioUrl(fileName) {
+  const params = new URLSearchParams({ name: fileName });
+  return `http://${host}:${port}/api/generated/audio?${params.toString()}`;
+}
+
+function mergeKitchenConfig(raw = {}) {
+  return {
+    ...defaultKitchenConfig,
+    ...raw,
+    ratios: {
+      ...defaultKitchenConfig.ratios,
+      ...(raw?.ratios || {}),
+    },
+    pools: {
+      ...defaultKitchenConfig.pools,
+      ...(raw?.pools || {}),
+    },
+  };
+}
+
+function kitchenPoolEntries(config) {
+  const merged = mergeKitchenConfig(config);
+  return [
+    ['outdoor', merged.pools.outdoor],
+    ['aerial', merged.pools.aerial],
+    ['warehouse', merged.pools.warehouse],
+  ];
+}
+
+function pickKitchenCandidateForDuration(candidates, targetDuration) {
+  return candidates
+    .filter((item) => item.duration >= targetDuration)
+    .sort((a, b) => {
+      const bucketDelta = (a.bucketKind === 'unused' ? 0 : 1) - (b.bucketKind === 'unused' ? 0 : 1);
+      if (bucketDelta !== 0) return bucketDelta;
+      return a.duration - b.duration;
+    })[0] || null;
+}
+
+function resolveBucketPath(bucketName, kitchenConfig = null) {
+  if (bucketDirs[bucketName]) {
+    return bucketDirs[bucketName];
+  }
+  const config = mergeKitchenConfig(kitchenConfig);
+  const kitchenBuckets = {
+    'kitchen-outdoor-unused': config.pools.outdoor.unusedDir,
+    'kitchen-outdoor-fragments': config.pools.outdoor.fragmentsDir,
+    'kitchen-outdoor-used': config.pools.outdoor.usedDir,
+    'kitchen-aerial-unused': config.pools.aerial.unusedDir,
+    'kitchen-aerial-fragments': config.pools.aerial.fragmentsDir,
+    'kitchen-aerial-used': config.pools.aerial.usedDir,
+    'kitchen-warehouse-unused': config.pools.warehouse.unusedDir,
+    'kitchen-warehouse-fragments': config.pools.warehouse.fragmentsDir,
+    'kitchen-warehouse-used': config.pools.warehouse.usedDir,
+  };
+  return kitchenBuckets[bucketName] || null;
+}
+
+async function listVideoFiles(dirPath) {
+  if (!dirPath || !existsSync(dirPath)) return [];
+  const entries = await readdir(dirPath, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !/\.(mp4|mov|mkv|avi)$/i.test(entry.name)) continue;
+    const filePath = path.join(dirPath, entry.name);
+    if (await shouldSkipPendingDeleteFile(filePath)) continue;
+    files.push(entry.name);
+  }
+  return files.sort((a, b) => a.localeCompare(b, 'en'));
+}
+
 function resolveVideoPath(searchParams) {
   const bucketName = String(searchParams.get('bucket') || '');
   const fileName = String(searchParams.get('name') || '');
-  const bucketPath = bucketDirs[bucketName];
+  const bucketPath = resolveBucketPath(bucketName);
   if (!bucketPath) {
     throw new Error('invalid bucket');
   }
@@ -152,6 +336,62 @@ function streamVideo(req, res, filePath) {
     createReadStream(filePath).pipe(res);
   } catch {
     writeJson(res, 500, { ok: false, error: 'stream failed' });
+  }
+}
+
+function resolveGeneratedAudioPath(searchParams) {
+  const fileName = String(searchParams.get('name') || '');
+  if (!fileName || fileName.includes('..') || fileName.includes('/') || fileName.includes('\\')) {
+    throw new Error('invalid file');
+  }
+  return {
+    filePath: path.join(generatedAudioDir, fileName),
+    fileName,
+  };
+}
+
+function audioMimeType(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.wav') return 'audio/wav';
+  if (ext === '.m4a') return 'audio/mp4';
+  if (ext === '.aac') return 'audio/aac';
+  if (ext === '.ogg') return 'audio/ogg';
+  return 'audio/mpeg';
+}
+
+function streamAudio(req, res, filePath) {
+  const range = req.headers.range;
+  try {
+    const stats = statSync(filePath);
+    const total = stats.size;
+    const contentType = audioMimeType(filePath);
+    if (range) {
+      const match = /bytes=(\d*)-(\d*)/.exec(String(range));
+      const start = match && match[1] ? Number(match[1]) : 0;
+      const end = match && match[2] ? Number(match[2]) : total - 1;
+      const safeStart = Number.isFinite(start) ? start : 0;
+      const safeEnd = Number.isFinite(end) ? Math.min(end, total - 1) : total - 1;
+      res.writeHead(206, {
+        'Content-Type': contentType,
+        'Accept-Ranges': 'bytes',
+        'Content-Range': `bytes ${safeStart}-${safeEnd}/${total}`,
+        'Content-Length': safeEnd - safeStart + 1,
+        'Cache-Control': 'no-store',
+        'Access-Control-Allow-Origin': '*',
+      });
+      createReadStream(filePath, { start: safeStart, end: safeEnd }).pipe(res);
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Content-Length': total,
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'no-store',
+      'Access-Control-Allow-Origin': '*',
+    });
+    createReadStream(filePath).pipe(res);
+  } catch {
+    writeJson(res, 500, { ok: false, error: 'audio stream failed' });
   }
 }
 
@@ -371,7 +611,27 @@ function runExecCapture(command, args) {
 
 function resolvePublicFile(relUrl, expectedPrefix) {
   const text = String(relUrl || '').trim();
-  if (!text || !text.startsWith(expectedPrefix)) {
+  if (!text) {
+    throw new Error(`invalid path: ${expectedPrefix}`);
+  }
+  if (/^https?:\/\//i.test(text)) {
+    const parsed = new URL(text);
+    if (parsed.pathname === '/api/generated/audio') {
+      const fileName = String(parsed.searchParams.get('name') || '');
+      if (!fileName || fileName.includes('..') || fileName.includes('/') || fileName.includes('\\')) {
+        throw new Error('invalid generated audio file');
+      }
+      const resolvedAudio = path.resolve(path.join(generatedAudioDir, fileName));
+      if (!resolvedAudio.startsWith(path.resolve(generatedAudioDir))) {
+        throw new Error('invalid generated audio path');
+      }
+      if (!existsSync(resolvedAudio)) {
+        throw new Error('file not found');
+      }
+      return resolvedAudio;
+    }
+  }
+  if (!text.startsWith(expectedPrefix)) {
     throw new Error(`invalid path: ${expectedPrefix}`);
   }
   const normalized = text.replace(/^\/+/, '');
@@ -807,19 +1067,514 @@ async function createClip({ sourcePath, start, duration, outputPath }) {
     sourcePath,
     '-t',
     `${Math.max(0.1, duration)}`,
+    '-vf',
+    'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,format=yuv420p',
     '-c:v',
     'libx264',
     '-preset',
     'veryfast',
     '-crf',
     '23',
+    '-pix_fmt',
+    'yuv420p',
     '-an',
     outputPath,
   ]);
 }
 
+async function collectKitchenCandidates(poolKey, poolConfig, excludedNames = new Set()) {
+  const buckets = [
+    { kind: 'unused', dir: poolConfig.unusedDir },
+    { kind: 'fragments', dir: poolConfig.fragmentsDir },
+  ];
+  const candidates = [];
+  for (const bucket of buckets) {
+    const files = await listVideoFiles(bucket.dir);
+    for (const name of files) {
+      if (excludedNames.has(name)) continue;
+      const sourcePath = path.join(bucket.dir, name);
+      const duration = await getMediaDurationSeconds(sourcePath).catch(() => 0);
+      if (!Number.isFinite(duration) || duration <= 0.2) continue;
+      candidates.push({
+        poolKey,
+        poolLabel: poolConfig.label || poolKey,
+        poolConfig,
+        bucketKind: bucket.kind,
+        name,
+        sourcePath,
+        duration,
+      });
+    }
+  }
+  return candidates;
+}
+
+async function concatVideoSegments(segmentPaths, outputPath) {
+  if (segmentPaths.length === 1) {
+    await runExecFile(ffmpegPath, [
+      '-y',
+      '-i',
+      segmentPaths[0],
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-crf',
+      '23',
+      '-pix_fmt',
+      'yuv420p',
+      '-an',
+      outputPath,
+    ]);
+    return;
+  }
+
+  const args = ['-y'];
+  for (const segmentPath of segmentPaths) {
+    args.push('-i', segmentPath);
+  }
+  const concatInputs = segmentPaths.map((_, index) => `[${index}:v:0]`).join('');
+  args.push(
+    '-filter_complex',
+    `${concatInputs}concat=n=${segmentPaths.length}:v=1:a=0[vout]`,
+    '-map',
+    '[vout]',
+    '-c:v',
+    'libx264',
+    '-preset',
+    'veryfast',
+    '-crf',
+    '23',
+    '-pix_fmt',
+    'yuv420p',
+    '-an',
+    outputPath,
+  );
+  await runExecFile(ffmpegPath, args);
+}
+
+async function finalizeKitchenSourceUsage(source, clipDuration, fragmentThreshold) {
+  const ext = extNameSafe(source.name);
+  const base = normalizeMaterialBaseName(source.name);
+  await mkdir(source.poolConfig.usedDir, { recursive: true });
+  const usedName = createBucketFileName(base, 'used', ext);
+  const usedPath = path.join(source.poolConfig.usedDir, usedName);
+  await createClip({
+    sourcePath: source.sourcePath,
+    start: 0,
+    duration: clipDuration,
+    outputPath: usedPath,
+  });
+
+  const remainingDuration = Math.max(0, source.duration - clipDuration);
+  let remainderBucket = '';
+  let remainderName = '';
+  if (remainingDuration > 0.3) {
+    remainderBucket = remainingDuration <= fragmentThreshold ? 'fragments' : 'unused';
+    const remainderDir = remainderBucket === 'fragments' ? source.poolConfig.fragmentsDir : source.poolConfig.unusedDir;
+    await mkdir(remainderDir, { recursive: true });
+    remainderName = createBucketFileName(base, remainderBucket === 'fragments' ? 'frag' : 'unused', ext);
+    const remainderPath = path.join(remainderDir, remainderName);
+    await createClip({
+      sourcePath: source.sourcePath,
+      start: clipDuration,
+      duration: remainingDuration,
+      outputPath: remainderPath,
+    });
+  }
+
+  await mkdir(sourceBackupDir, { recursive: true });
+  const backupName = createBucketFileName(base, `src_${source.poolKey}`, ext);
+  const cleanupState = await archiveAndRemoveSourceMaterial(
+    source.sourcePath,
+    path.join(sourceBackupDir, backupName),
+  );
+
+  return {
+    usedName,
+    usedPath,
+    clipDuration,
+    remainingDuration,
+    remainderBucket,
+    remainderName,
+    sourceMaterial: source.name,
+    poolKey: source.poolKey,
+    poolLabel: source.poolConfig.label || source.poolKey,
+    ...cleanupState,
+  };
+}
+
+async function prepareKitchenSource({
+  audioDuration,
+  excludedMaterialNames = new Set(),
+  kitchenConfig,
+}) {
+  const config = mergeKitchenConfig(kitchenConfig);
+  const excludedNames = excludedMaterialNames instanceof Set
+    ? new Set([...excludedMaterialNames])
+    : new Set(excludedMaterialNames || []);
+  const fragmentThreshold = Math.max(1, Number(config.fragmentThreshold || 10));
+  const poolSpecs = kitchenPoolEntries(config)
+    .map(([poolKey, poolConfig]) => ({
+      poolKey,
+      poolConfig,
+      ratio: Math.max(0, Number(config.ratios?.[poolKey] || 0)),
+    }))
+    .filter((item) => item.ratio > 0);
+
+  if (!poolSpecs.length) {
+    throw new Error('kitchen ratios missing');
+  }
+
+  const targets = poolSpecs.map((item, index) => {
+    if (index === poolSpecs.length - 1) {
+      const allocated = poolSpecs
+        .slice(0, index)
+        .reduce((sum, current) => sum + Math.max(0.6, audioDuration * (current.ratio / 100)), 0);
+      return { ...item, targetDuration: Math.max(0.6, audioDuration - allocated) };
+    }
+    return { ...item, targetDuration: Math.max(0.6, audioDuration * (item.ratio / 100)) };
+  });
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'kitchen-compose-'));
+  const segmentPaths = [];
+  const usageRecords = [];
+  let totalDuration = 0;
+  try {
+    for (const spec of targets) {
+      const candidates = await collectKitchenCandidates(spec.poolKey, spec.poolConfig, excludedNames);
+      if (!candidates.length) {
+        throw new Error(`${spec.poolConfig.label || spec.poolKey} 没有可用素材`);
+      }
+      let remaining = spec.targetDuration;
+      for (const source of candidates) {
+        if (remaining <= 0.15) break;
+        const clipDuration = Math.max(0.6, Math.min(source.duration, remaining));
+        const segmentPath = path.join(tempDir, `${spec.poolKey}_${segmentPaths.length + 1}.mp4`);
+        await createClip({
+          sourcePath: source.sourcePath,
+          start: 0,
+          duration: clipDuration,
+          outputPath: segmentPath,
+        });
+        segmentPaths.push(segmentPath);
+        totalDuration += clipDuration;
+        remaining -= clipDuration;
+        usageRecords.push(await finalizeKitchenSourceUsage(source, clipDuration, fragmentThreshold));
+        excludedNames.add(source.name);
+      }
+      if (remaining > 0.2) {
+        throw new Error(`${spec.poolConfig.label || spec.poolKey} 素材不足，还差 ${remaining.toFixed(1)}s`);
+      }
+    }
+
+    const mergedPath = path.join(tempDir, `kitchen_merged_${Date.now()}.mp4`);
+    await concatVideoSegments(segmentPaths, mergedPath);
+    return {
+      mergedPath,
+      tempDir,
+      totalDuration,
+      usageRecords,
+    };
+  } catch (error) {
+    await rm(tempDir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function prepareKitchenSourceStrict({
+  audioDuration,
+  excludedMaterialNames = new Set(),
+  kitchenConfig,
+}) {
+  const config = mergeKitchenConfig(kitchenConfig);
+  const excludedNames = excludedMaterialNames instanceof Set
+    ? new Set([...excludedMaterialNames])
+    : new Set(excludedMaterialNames || []);
+  const fragmentThreshold = Math.max(1, Number(config.fragmentThreshold || 10));
+  const poolSpecs = kitchenPoolEntries(config)
+    .map(([poolKey, poolConfig]) => ({
+      poolKey,
+      poolConfig,
+      ratio: Math.max(0, Number(config.ratios?.[poolKey] || 0)),
+    }))
+    .filter((item) => item.ratio > 0);
+
+  if (!poolSpecs.length) {
+    throw new Error('kitchen ratios missing');
+  }
+
+  const targets = poolSpecs.map((item, index) => {
+    if (index === poolSpecs.length - 1) {
+      const allocated = poolSpecs
+        .slice(0, index)
+        .reduce((sum, current) => sum + Math.max(0.6, audioDuration * (current.ratio / 100)), 0);
+      return { ...item, targetDuration: Math.max(0.6, audioDuration - allocated) };
+    }
+    return { ...item, targetDuration: Math.max(0.6, audioDuration * (item.ratio / 100)) };
+  });
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'kitchen-compose-'));
+  const segmentPaths = [];
+  const usageRecords = [];
+  let totalDuration = 0;
+  try {
+    for (const spec of targets) {
+      const candidates = await collectKitchenCandidates(spec.poolKey, spec.poolConfig, excludedNames);
+      if (!candidates.length) {
+        throw new Error(`${spec.poolConfig.label || spec.poolKey} 没有可用素材`);
+      }
+
+      const selected = pickKitchenCandidateForDuration(candidates, spec.targetDuration);
+      if (!selected) {
+        const maxDuration = Math.max(...candidates.map((item) => item.duration));
+        throw new Error(
+          `${spec.poolConfig.label || spec.poolKey} 可用素材不足，需要 ${spec.targetDuration.toFixed(1)}s，当前最长只有 ${maxDuration.toFixed(1)}s`,
+        );
+      }
+
+      const clipDuration = Math.max(0.6, Math.min(selected.duration, spec.targetDuration));
+      const segmentPath = path.join(tempDir, `${spec.poolKey}_${segmentPaths.length + 1}.mp4`);
+      await createClip({
+        sourcePath: selected.sourcePath,
+        start: 0,
+        duration: clipDuration,
+        outputPath: segmentPath,
+      });
+      segmentPaths.push(segmentPath);
+      totalDuration += clipDuration;
+      usageRecords.push(await finalizeKitchenSourceUsage(selected, clipDuration, fragmentThreshold));
+      excludedNames.add(selected.name);
+    }
+
+    const mergedPath = path.join(tempDir, `kitchen_merged_${Date.now()}.mp4`);
+    await concatVideoSegments(segmentPaths, mergedPath);
+    return {
+      mergedPath,
+      tempDir,
+      totalDuration,
+      usageRecords,
+    };
+  } catch (error) {
+    await rm(tempDir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function renderVideoWithAudioAndSubtitles({
+  sourceVideoPath,
+  sourceDuration,
+  sourceBase,
+  itemNumber,
+  title,
+  subtitle,
+  titleStyle = {},
+  subtitleStyle = {},
+  titleHold = '8',
+  audioUrl,
+  exportDir = '',
+  sourceMaterial = '',
+}) {
+  const audioPath = resolvePublicFile(audioUrl, '/generated_audio/');
+  const audioDuration = await getMediaDurationSeconds(audioPath);
+  const targetDuration = Math.max(2, Math.min(audioDuration + 0.2, sourceDuration));
+  await mkdir(generatedVideoDir, { recursive: true });
+  const safeItem = String(itemNumber || `video_${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '_');
+  const outputName = `${safeItem}_${Date.now()}.mp4`;
+  const outputPath = path.join(generatedVideoDir, outputName);
+
+  const fontPath = pickFontPath();
+  const previewBaseWidth = 640;
+  const outputWidth = 1080;
+  const styleScale = outputWidth / previewBaseWidth;
+  let titleSize = Math.min(112, Math.max(26, Math.round(Number(titleStyle.size || 64) * styleScale)));
+  const subtitleSize = Math.min(84, Math.max(24, Math.round(Number(subtitleStyle.size || 42) * styleScale)));
+  const titleY = Math.max(5, Math.min(95, Number(titleStyle.y || 18)));
+  const subtitleX = Math.max(5, Math.min(95, Number(subtitleStyle.x || 50)));
+  const subtitleY = Math.max(5, Math.min(95, Number(subtitleStyle.y || 78)));
+  const titleColor = String(titleStyle.color || '#ffffff').replace('#', '0x');
+  const titleShadowColor = String(titleStyle.shadowColor || '#000000').replace('#', '0x');
+  const subtitleColor = String(subtitleStyle.color || '#ffffff').replace('#', '0x');
+  const titleText = wrapOverlayForStyle(String(title || ''), {
+    target: 'title',
+    outputSize: titleSize,
+    maxLines: 2,
+    widthPct: titleStyle.width,
+  });
+  titleSize = fitTitleOutputSize(String(title || ''), titleSize, titleStyle.width);
+  const subtitleXExpr = `(w*${(subtitleX / 100).toFixed(4)})-(text_w/2)`;
+  const subtitleYExpr = `(h-text_h)*${(subtitleY / 100).toFixed(4)}`;
+  const titleHoldSec = titleHold === 'always' ? null : Math.max(0.5, Number(titleHold) || 8);
+
+  const drawBase = [
+    'scale=1080:1920:force_original_aspect_ratio=increase',
+    'crop=1080:1920',
+  ];
+  const textFilters = [];
+  const textTempDir = await mkdtemp(path.join(os.tmpdir(), 'compose-text-'));
+  try {
+    if (titleText) {
+      const titleLines = titleText.split('\n').map((line) => line.trim()).filter(Boolean).slice(0, 2);
+      const titleLineGap = Math.round(titleSize * 0.12);
+      const titleBlockHeight = titleLines.length * titleSize + Math.max(0, titleLines.length - 1) * titleLineGap;
+      for (let i = 0; i < titleLines.length; i += 1) {
+        const titleTextPath = path.join(textTempDir, `title_${i}.txt`);
+        await writeFile(titleTextPath, titleLines[i], 'utf8');
+        const titleArgs = [
+          `textfile='${escapeFilterPath(titleTextPath)}'`,
+          `fontsize=${titleSize}`,
+          `fontcolor=${titleColor}`,
+          'x=(w-text_w)/2',
+          `y=((h-${titleBlockHeight})*${(titleY / 100).toFixed(4)})+${i * (titleSize + titleLineGap)}`,
+          'shadowx=3',
+          'shadowy=3',
+          `shadowcolor=${titleShadowColor}`,
+        ];
+        if (fontPath) titleArgs.unshift(`fontfile='${escapeDrawText(fontPath)}'`);
+        if (titleHoldSec) titleArgs.push(`enable='between(t,0,${titleHoldSec.toFixed(2)})'`);
+        textFilters.push(`drawtext=${titleArgs.join(':')}`);
+      }
+    }
+
+    const subtitleChunks = await loadGeneratedSubtitleChunks(audioUrl, subtitle);
+    const subtitleMaxChars = Math.max(4, estimateColsForOverlay(subtitle, subtitleSize, 'subtitle', subtitleStyle.width));
+    const subtitleRenderChunks = subtitleChunks.flatMap((chunk) => expandSubtitleChunk(chunk, subtitleMaxChars));
+    for (let i = 0; i < subtitleRenderChunks.length; i += 1) {
+      const chunk = subtitleRenderChunks[i];
+      const wrappedLine = wrapOverlayForStyle(chunk.line, {
+        target: 'subtitle',
+        outputSize: subtitleSize,
+        maxLines: 1,
+        widthPct: subtitleStyle.width,
+      });
+      if (!wrappedLine) continue;
+      const chunkPath = path.join(textTempDir, `sub_${i}.txt`);
+      await writeFile(chunkPath, wrappedLine, 'utf8');
+      const subtitleArgs = [
+        `textfile='${escapeFilterPath(chunkPath)}'`,
+        `fontsize=${subtitleSize}`,
+        `fontcolor=${subtitleColor}`,
+        `x=${subtitleXExpr}`,
+        `y=${subtitleYExpr}`,
+        'shadowx=3',
+        'shadowy=3',
+        'shadowcolor=0x000000',
+        `enable='between(t,${chunk.start.toFixed(2)},${chunk.end.toFixed(2)})'`,
+      ];
+      if (fontPath) subtitleArgs.unshift(`fontfile='${escapeDrawText(fontPath)}'`);
+      textFilters.push(`drawtext=${subtitleArgs.join(':')}`);
+    }
+
+    const vf = [...drawBase, ...textFilters].join(',');
+    await runExecFile(ffmpegPath, [
+      '-y',
+      '-ss',
+      '0',
+      '-i',
+      sourceVideoPath,
+      '-i',
+      audioPath,
+      '-t',
+      `${targetDuration}`,
+      '-vf',
+      vf,
+      '-map',
+      '0:v:0',
+      '-map',
+      '1:a:0',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-crf',
+      '23',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '192k',
+      '-shortest',
+      '-movflags',
+      '+faststart',
+      outputPath,
+    ]);
+  } finally {
+    await rm(textTempDir, { recursive: true, force: true });
+  }
+
+  const finalExportDir = exportDir || unifiedExportDir;
+  await mkdir(finalExportDir, { recursive: true });
+  const exportPath = path.join(finalExportDir, safeExportFileName({ itemNumber, title }));
+  await copyFile(outputPath, exportPath);
+
+  return {
+    videoUrl: `/generated_videos/${outputName}`,
+    outputPath,
+    exportPath,
+    sourceBase,
+    sourceMaterial,
+    duration: targetDuration,
+  };
+}
+
+async function composeKitchenFinalVideo({
+  itemNumber,
+  title,
+  subtitle,
+  titleStyle = {},
+  subtitleStyle = {},
+  titleHold = '8',
+  audioUrl,
+  exportDir = '',
+  excludedMaterialNames = new Set(),
+  kitchenConfig = null,
+}) {
+  const audioPath = resolvePublicFile(audioUrl, '/generated_audio/');
+  const audioDuration = await getMediaDurationSeconds(audioPath);
+  const prepared = await prepareKitchenSourceStrict({
+    audioDuration: Math.max(2, audioDuration + 0.2),
+    excludedMaterialNames,
+    kitchenConfig,
+  });
+  try {
+    const renderResult = await renderVideoWithAudioAndSubtitles({
+      sourceVideoPath: prepared.mergedPath,
+      sourceDuration: prepared.totalDuration,
+      sourceBase: 'kitchen_mix',
+      itemNumber,
+      title,
+      subtitle,
+      titleStyle,
+      subtitleStyle,
+      titleHold,
+      audioUrl,
+      exportDir,
+      sourceMaterial: prepared.usageRecords.map((item) => item.sourceMaterial).join(', '),
+    });
+    const firstUsage = prepared.usageRecords[0] || {};
+    return {
+      ...renderResult,
+      usedMaterial: firstUsage.usedName || '',
+      sourceMaterials: prepared.usageRecords.map((item) => item.sourceMaterial).filter(Boolean),
+      segmentDetails: prepared.usageRecords.map((item) => ({
+        poolKey: item.poolKey || '',
+        poolLabel: item.poolLabel || item.poolKey || '',
+        sourceMaterial: item.sourceMaterial || '',
+        clipDuration: Number(item.clipDuration || 0),
+      })),
+      remainingDuration: 0,
+      remainderBucket: '',
+      remainderName: '',
+      previewUrl: '',
+    };
+  } finally {
+    await rm(prepared.tempDir, { recursive: true, force: true });
+  }
+}
+
 async function composeFinalVideo({
   itemNumber,
+  projectType = 'waidan',
+  kitchenConfig = null,
   title,
   subtitle,
   titleStyle = {},
@@ -1005,7 +1760,7 @@ async function composeFinalVideo({
   let remainderName = '';
   let remainderBucket = '';
   if (remainingDuration > 0.3) {
-    remainderBucket = remainingDuration < 40 ? 'fragments' : 'unused';
+    remainderBucket = remainingDuration <= 10 ? 'fragments' : 'unused';
     remainderName = createBucketFileName(base, remainderBucket === 'fragments' ? 'frag' : 'unused', ext);
     const remainderPath = path.join(bucketDirs[remainderBucket], remainderName);
     await createClip({
@@ -1018,8 +1773,10 @@ async function composeFinalVideo({
 
   await mkdir(sourceBackupDir, { recursive: true });
   const backupName = createBucketFileName(base, 'src', ext);
-  await copyFile(sourceVideoPath, path.join(sourceBackupDir, backupName));
-  await rm(sourceVideoPath, { force: true });
+  const cleanupState = await archiveAndRemoveSourceMaterial(
+    sourceVideoPath,
+    path.join(sourceBackupDir, backupName),
+  );
   await runScan();
 
   const finalExportDir = exportDir || unifiedExportDir;
@@ -1033,12 +1790,14 @@ async function composeFinalVideo({
     exportPath,
     usedMaterial: usedName,
     sourceMaterial: source.name,
+    sourceMaterials: [source.name],
     sourceBase,
     duration: targetDuration,
     remainingDuration,
     remainderBucket,
     remainderName,
     previewUrl: buildFileUrl(usedName, 'used'),
+    ...cleanupState,
   };
 }
 
@@ -1114,12 +1873,14 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && parsedUrl.pathname === '/api/materials/folders') {
+    const kitchenConfig = mergeKitchenConfig();
     writeJson(res, 200, {
       ok: true,
       materialRoot,
       unusedDir: bucketDirs.unused,
       fragmentsDir: bucketDirs.fragments,
       usedDir: bucketDirs.used,
+      kitchenPools: kitchenConfig.pools,
       unifiedExportDir,
     });
     return;
@@ -1144,6 +1905,31 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'GET' && parsedUrl.pathname === '/api/materials/first-frame') {
     try {
+      const projectType = String(parsedUrl.searchParams.get('projectType') || 'waidan');
+      if (projectType === 'kitchen') {
+        const config = mergeKitchenConfig();
+        const outdoorUnusedFiles = await listVideoFiles(config.pools.outdoor.unusedDir);
+        const outdoorFragmentFiles = await listVideoFiles(config.pools.outdoor.fragmentsDir);
+        const firstName = outdoorUnusedFiles[0] || outdoorFragmentFiles[0] || '';
+        const bucketName = outdoorUnusedFiles[0] ? 'kitchen-outdoor-unused' : 'kitchen-outdoor-fragments';
+        if (!firstName) {
+          writeJson(res, 404, { ok: false, error: 'no kitchen outdoor materials' });
+          return;
+        }
+        const sourcePath = path.join(
+          bucketName === 'kitchen-outdoor-unused' ? config.pools.outdoor.unusedDir : config.pools.outdoor.fragmentsDir,
+          firstName,
+        );
+        const duration = await getMediaDurationSeconds(sourcePath).catch(() => 0);
+        writeJson(res, 200, {
+          ok: true,
+          fileName: firstName,
+          duration,
+          url: buildFileUrl(firstName, bucketName),
+        });
+        return;
+      }
+
       const inventory = await loadInventory();
       const first = inventory?.unused?.files?.[0] || null;
       if (!first) {
@@ -1166,6 +1952,16 @@ const server = createServer(async (req, res) => {
     try {
       const { filePath } = resolveVideoPath(parsedUrl.searchParams);
       streamVideo(req, res, filePath);
+    } catch (error) {
+      writeJson(res, 400, { ok: false, error: error.message });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && parsedUrl.pathname === '/api/generated/audio') {
+    try {
+      const { filePath } = resolveGeneratedAudioPath(parsedUrl.searchParams);
+      streamAudio(req, res, filePath);
     } catch (error) {
       writeJson(res, 400, { ok: false, error: error.message });
     }
@@ -1376,8 +2172,12 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && parsedUrl.pathname === '/api/compose/render') {
     try {
       const body = await readJsonBody(req);
-      const result = await composeFinalVideo({
+      const projectType = String(body.projectType || 'waidan');
+      const renderFn = projectType === 'kitchen' ? composeKitchenFinalVideo : composeFinalVideo;
+      const result = await renderFn({
         itemNumber: String(body.itemNumber || `video_${Date.now()}`),
+        projectType,
+        kitchenConfig: body.kitchenConfig || null,
         title: String(body.title || ''),
         subtitle: String(body.subtitle || ''),
         titleStyle: body.titleStyle || {},
@@ -1395,21 +2195,29 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && parsedUrl.pathname === '/api/compose/batch-render') {
     try {
       const body = await readJsonBody(req);
+      const projectType = String(body.projectType || 'waidan');
       const tasks = Array.isArray(body.tasks) ? body.tasks : [];
       if (!tasks.length) throw new Error('batch tasks required');
       const exportDir = unifiedExportDir;
       const usedSourceNames = new Set();
       const results = [];
-      await runScan();
-      const inventory = await loadInventory();
-      const availablePool = [...(inventory?.unused?.files || []), ...(inventory?.fragments?.files || [])];
-      if (availablePool.length < tasks.length) {
-        throw new Error(`not enough materials: need ${tasks.length}, got ${availablePool.length}`);
+      if (projectType !== 'kitchen') {
+        await runScan();
+        const inventory = await loadInventory();
+        const availablePool = [...(inventory?.unused?.files || []), ...(inventory?.fragments?.files || [])];
+        if (availablePool.length < tasks.length) {
+          throw new Error(`not enough materials: need ${tasks.length}, got ${availablePool.length}`);
+        }
       }
 
       for (const task of tasks) {
-        const result = await composeFinalVideo({
+        const renderFn = projectType === 'kitchen' || String(task.projectType || '') === 'kitchen'
+          ? composeKitchenFinalVideo
+          : composeFinalVideo;
+        const result = await renderFn({
           itemNumber: String(task.itemNumber || `video_${Date.now()}`),
+          projectType: String(task.projectType || projectType || 'waidan'),
+          kitchenConfig: body.kitchenConfig || null,
           title: String(task.title || ''),
           subtitle: String(task.subtitle || ''),
           titleStyle: task.titleStyle || {},
@@ -1419,6 +2227,9 @@ const server = createServer(async (req, res) => {
           exportDir,
           excludedMaterialNames: usedSourceNames,
         });
+        for (const materialName of (result.sourceMaterials || [])) {
+          if (materialName) usedSourceNames.add(materialName);
+        }
         if (result.sourceMaterial) usedSourceNames.add(result.sourceMaterial);
         results.push({
           taskId: String(task.id || ''),
