@@ -161,6 +161,7 @@ function normalizeTask(task, fallbackVoiceId = null) {
   return {
     ...task,
     projectType: task.projectType === 'kitchen' ? 'kitchen' : 'waidan',
+    entryMode: task.entryMode === 'batch' ? 'batch' : 'single',
     itemNumber: task.itemNumber || `${getTodayKey()}_0001`,
     titleStyle: { width: 72, shadowColor: '#000000', ...(task.titleStyle || { size: 64, color: '#ffffff', x: 50, y: 18 }) },
     subtitleStyle: { width: 72, ...(task.subtitleStyle || { size: 42, color: '#ffffff', x: 50, y: 78 }) },
@@ -222,6 +223,14 @@ function getProjectTypeLabel(projectType = state.projectType) {
 
 function getProjectTasks(projectType = state.projectType) {
   return (state.tasks || []).filter((task) => (task.projectType || 'waidan') === projectType);
+}
+
+function getSingleProjectTasks(projectType = state.projectType) {
+  return getProjectTasks(projectType).filter((task) => task.entryMode !== 'batch');
+}
+
+function getBatchProjectTasks(projectType = state.projectType) {
+  return getProjectTasks(projectType).filter((task) => task.entryMode === 'batch');
 }
 
 function renderKitchenEmptyBridge(message = '当前二手厨具项目还是空的。') {
@@ -288,14 +297,9 @@ function renderKitchenConfigPanel(mode = 'compose') {
   const config = getKitchenConfig();
   const totalRatio = Number(config.ratios.outdoor || 0) + Number(config.ratios.aerial || 0) + Number(config.ratios.warehouse || 0);
   const title = mode === 'batch' ? '二手厨具视频池配置' : '二手厨具合成配置';
-  const hint = mode === 'batch'
-    ? '批量视频会严格按这里的比例，从外场、航拍、仓库内部三个池子的可用素材各截一段再拼接。'
-    : '当前单条视频会严格按这里的比例，从外场、航拍、仓库内部三个池子的可用素材各截一段再拼接。';
   return `
     <section class="panel kitchen-config-panel">
-      <p class="eyebrow">二手厨具项目</p>
       <h3>${title}</h3>
-      <p class="hint">${hint} 预览图默认先抓外场池。</p>
       <div class="kitchen-ratio-strip">
         <label class="kitchen-inline-field">外场
           <input type="number" min="0" max="100" value="${Number(config.ratios.outdoor || 0)}" data-kitchen-ratio="outdoor" />
@@ -413,6 +417,7 @@ function createTask({ batchId, index, title, body, language = 'yue' }) {
   return {
     id,
     projectType: state.projectType,
+    entryMode: state.workMode === 'batch' ? 'batch' : 'single',
     itemNumber,
     batchId,
     title: title.trim(),
@@ -453,6 +458,10 @@ function createTask({ batchId, index, title, body, language = 'yue' }) {
     audioTraceId: '',
     subtitleConfirmed: false,
   };
+}
+
+function shouldPreserveCurrentFocus() {
+  return Boolean(state.activeTaskId);
 }
 
 function normalizeAudioUrl(audioUrl) {
@@ -623,13 +632,15 @@ function addPasteTask(event) {
     body,
   });
 
+  const preserveFocus = shouldPreserveCurrentFocus();
   setState({
     batchCount: state.batchCount + 1,
     tasks: [task, ...state.tasks],
-    activeTaskId: task.id,
-    activeView: 'audio',
+    activeTaskId: preserveFocus ? state.activeTaskId : task.id,
+    activeView: preserveFocus ? state.activeView : 'audio',
   });
   addOperationLog('文案上传', `#${task.itemNumber} ${task.title}`);
+  if (preserveFocus) notify(`已加入队列：#${task.itemNumber}`);
   event.currentTarget.reset();
 }
 
@@ -654,6 +665,8 @@ async function importExcel(event) {
   }
 
   const batchId = createBatchId();
+  const prevMode = state.workMode;
+  state.workMode = 'single';
   const tasks = validRows.map((row, index) =>
     createTask({
       batchId,
@@ -663,14 +676,17 @@ async function importExcel(event) {
       language: row.language || 'yue',
     }),
   );
+  state.workMode = prevMode;
 
+  const preserveFocus = shouldPreserveCurrentFocus();
   setState({
     batchCount: state.batchCount + 1,
     tasks: [...tasks, ...state.tasks],
-    activeTaskId: tasks[0].id,
-    activeView: 'audio',
+    activeTaskId: preserveFocus ? state.activeTaskId : tasks[0].id,
+    activeView: preserveFocus ? state.activeView : 'audio',
   });
   addOperationLog('Excel导入', `导入 ${tasks.length} 条文案`);
+  if (preserveFocus) notify(`已加入队列：${tasks.length} 条`);
   event.target.value = '';
 }
 
@@ -695,6 +711,8 @@ async function importBatchExcel(event) {
   }
 
   const batchId = createBatchId();
+  const prevMode = state.workMode;
+  state.workMode = 'batch';
   const tasks = validRows.map((row, index) =>
     createTask({
       batchId,
@@ -704,16 +722,19 @@ async function importBatchExcel(event) {
       language: row.language || 'yue',
     }),
   );
+  state.workMode = prevMode;
 
+  const preserveFocus = shouldPreserveCurrentFocus();
   setState({
     batchCount: state.batchCount + 1,
     tasks: [...tasks, ...state.tasks],
-    activeTaskId: tasks[0].id,
-    activeView: 'batch',
+    activeTaskId: preserveFocus ? state.activeTaskId : tasks[0].id,
+    activeView: preserveFocus ? state.activeView : 'batch',
     workMode: 'batch',
     batchExportFolderName: `${batchId}_videos`,
   });
   addOperationLog('批量文案导入', `${batchId} / ${tasks.length} 条`);
+  if (preserveFocus) notify(`已加入队列：${batchId} / ${tasks.length} 条`);
   event.target.value = '';
 }
 
@@ -733,6 +754,7 @@ async function addVoice(event) {
   }
 
   try {
+    notify('已提交声音克隆，请等待。');
     const dataBase64 = await fileToBase64(sampleFile);
     const response = await fetch('http://127.0.0.1:3210/api/minimax/clone-voice', {
       method: 'POST',
@@ -882,6 +904,22 @@ function removeFailedAll() {
   addOperationLog('批量删除失败', `${failedTasks.length} 条`, 'error');
 }
 
+function removeBatchTasks(batchId) {
+  if (!batchId) return;
+  const batchTasks = state.tasks.filter((task) => task.batchId === batchId);
+  if (!batchTasks.length) return;
+  if (!confirm(`确认取消本批文案？\n${batchId} / ${batchTasks.length} 条`)) return;
+  const batchIds = [...new Set(state.tasks.map((task) => task.batchId).filter(Boolean))].filter((id) => id !== batchId);
+  const remainingTasks = state.tasks.filter((task) => task.batchId !== batchId);
+  const nextActiveTaskId = remainingTasks.find((task) => task.batchId === batchIds[0])?.id || remainingTasks[0]?.id || null;
+  setState({
+    tasks: remainingTasks,
+    activeTaskId: nextActiveTaskId,
+  });
+  addOperationLog('取消本批文案', `${batchId} / ${batchTasks.length} 条`, 'error');
+  notify(`已取消本批文案：${batchId}`);
+}
+
 async function generateAudio(taskId) {
   const task = state.tasks.find((item) => item.id === taskId);
   if (!task) return;
@@ -903,6 +941,7 @@ async function generateAudio(taskId) {
       : item,
   );
   setState({ tasks: pendingTasks });
+  notify(`已提交生成音频：#${task.itemNumber}`);
 
   try {
     const response = await fetch('http://127.0.0.1:3210/api/minimax/tts', {
@@ -1024,6 +1063,7 @@ async function composeVideo(taskId) {
       : item,
   );
   setState({ tasks: runningTasks });
+  notify(`已提交合成视频：#${task.itemNumber}`);
 
   try {
     const cleanAudioUrl = String(task.audioUrl).split('?')[0];
@@ -1095,6 +1135,10 @@ function getBatchTasks(batchId) {
   return getProjectTasks().filter((task) => task.batchId === batchId);
 }
 
+function getAllBatchTasks(batchId) {
+  return (state.tasks || []).filter((task) => task.batchId === batchId);
+}
+
 function applyBatchVoice(batchId, voiceId) {
   if (!batchId) return;
   const tasks = state.tasks.map((task) =>
@@ -1138,7 +1182,7 @@ function confirmBatchSubtitles(batchId) {
   );
   setState({ tasks });
   addOperationLog('批量字幕确认', `${batchId} 已确认标题和字幕样式`);
-  notify('这个批次的标题和字幕样式已确认，可以继续导出视频。');
+  notify(`这个批次已确认 ${tasks.filter((task) => task.batchId === batchId && task.subtitleConfirmed).length}/${tasks.filter((task) => task.batchId === batchId).length} 条。`);
 }
 
 function confirmTaskSubtitle(taskId) {
@@ -1155,9 +1199,19 @@ function confirmTaskSubtitle(taskId) {
         }
       : task,
   );
-  setState({ tasks });
+  const confirmedTask = tasks.find((task) => task.id === taskId) || current;
+  const batchId = confirmedTask.batchId || '';
+  let nextActiveTaskId = state.activeTaskId;
+  let batchMessage = '';
+  if (batchId) {
+    const batchTasks = tasks.filter((task) => task.batchId === batchId);
+    const confirmedCount = batchTasks.filter((task) => task.subtitleConfirmed).length;
+    nextActiveTaskId = taskId;
+    batchMessage = `当前批次已确认 ${confirmedCount}/${batchTasks.length} 条。`;
+  }
+  setState({ tasks, activeTaskId: nextActiveTaskId });
   addOperationLog('字幕确认', `#${current.itemNumber} 已确认标题和字幕样式`);
-  notify('这条任务的标题和字幕样式已确认，可以开始合成视频。');
+  notify(`这条字幕已确认。${batchMessage || '现在可以合成视频。'}`);
 }
 
 function updateTaskSubtitleText(taskId, value) {
@@ -1409,6 +1463,7 @@ async function startBatchAll(batchId) {
   if (!batchId) return;
   let batchTasks = getBatchTasks(batchId);
   addOperationLog('批量开始', `${batchId} 开始自动执行`);
+  notify(`已提交批量生成音频：${batchId}`);
   await generateBatchAudio(batchId, { force: false });
   batchTasks = getBatchTasks(batchId);
   const pendingAudio = batchTasks.filter((task) => task.audioStatus !== '已生成' || !task.audioUrl);
@@ -1437,6 +1492,7 @@ async function continueBatchCompose(batchId) {
     return;
   }
   addOperationLog('继续合并', `${batchId} 仅重试视频合成 ${targets.length} 条`);
+  notify(`已提交批量合成视频：${batchId}`);
   await runBatchRender(batchId, targets, '继续合并');
 }
 function selectVoice(taskId, voiceId) {
@@ -1622,7 +1678,9 @@ function formatSegmentDetails(segmentDetails = []) {
 
 function render() {
   const currentProject = getCurrentProjectMeta();
-  const projectTasks = getProjectTasks();
+  const projectTasks = state.activeView === 'batch'
+    ? getBatchProjectTasks()
+    : getSingleProjectTasks();
   const activeTask = projectTasks.find((task) => task.id === state.activeTaskId) || projectTasks[0] || null;
   document.querySelector('#app').innerHTML = `
     <div class="shell">
@@ -1643,8 +1701,8 @@ function render() {
           <small>${currentProject.note}</small>
         </div>
         ${renderNav('audio', '单条-生成音频')}
-        ${renderNav('batch', '批量制作')}
         ${renderNav('compose', '单条-合成视频')}
+        ${renderNav('batch', '批量制作')}
         ${renderNav('materials', '素材库')}
         ${renderNav('logs', '操作记录')}
         <div class="local-note">本地模式。批次号和编号自动生成。</div>
@@ -1696,7 +1754,7 @@ function renderVideoModal() {
 }
 
 function renderAudioWorkbench(activeTask) {
-  const projectTasks = getProjectTasks();
+  const projectTasks = getSingleProjectTasks();
   const taskOptions = projectTasks.map((task) =>
     `<option value="${task.id}" ${activeTask?.id === task.id ? 'selected' : ''}>#${task.itemNumber} ${escapeHtml(task.title)}</option>`,
   ).join('');
@@ -1791,7 +1849,7 @@ function renderAudioWorkbench(activeTask) {
 }
 
 function renderTaskBoard(activeTask) {
-  const tasks = getProjectTasks();
+  const tasks = getSingleProjectTasks();
   const doneAudio = tasks.filter((task) => task.audioStatus === '已生成');
   const pendingAudio = tasks.filter((task) => task.audioStatus !== '已生成');
   const failedCount = tasks.filter((task) => String(task.status).includes('失败')).length;
@@ -1858,26 +1916,27 @@ function renderNoticeModal() {
 }
 
 function renderBatchWorkbench(activeTask) {
-  const projectTasks = getProjectTasks();
+  const projectTasks = getBatchProjectTasks();
   const batchIds = [...new Set(projectTasks.map((task) => task.batchId).filter(Boolean))];
   const activeBatchId = activeTask?.batchId || batchIds[0] || '';
+  const allBatchTasks = getAllBatchTasks(activeBatchId);
   const batchTasks = getBatchTasks(activeBatchId);
   const isBatchRunning = state.batchProcessingBatchId === activeBatchId;
-  const pendingBatchTasks = isBatchRunning ? [] : batchTasks.filter((task) => task.videoStatus !== '已合成');
+  const pendingBatchTasks = batchTasks.filter((task) => task.videoStatus !== '已合成');
   const progressBatchTasks = batchTasks.filter((task) => task.videoStatus !== '已合成');
   const completedBatchTasks = batchTasks.filter((task) => task.videoStatus === '已合成');
   const batchActiveTask =
     pendingBatchTasks.find((task) => task.id === activeTask?.id) ||
     pendingBatchTasks[0] ||
     null;
-  const doneAudio = batchTasks.filter((task) => task.audioStatus === '已生成').length;
-  const doneVideo = completedBatchTasks.length;
-  const confirmedCount = batchTasks.filter((task) => task.subtitleConfirmed).length;
+  const doneAudio = allBatchTasks.filter((task) => task.audioStatus === '已生成').length;
+  const doneVideo = allBatchTasks.filter((task) => task.videoStatus === '已合成').length;
+  const confirmedCount = allBatchTasks.filter((task) => task.subtitleConfirmed).length;
   const voiceOptions = state.voices.map((voice) =>
     `<option value="${voice.id}" ${batchActiveTask?.selectedVoiceId === voice.id ? 'selected' : ''}>${escapeHtml(voice.name)}</option>`,
   ).join('');
   const folders = state.materialFolders || defaultMaterialFolders;
-  const batchDocRows = isBatchRunning ? '' : pendingBatchTasks.map((task) => `
+  const batchDocRows = pendingBatchTasks.map((task) => `
     <tr>
       <td>${escapeHtml(task.batchId || '')} / ${escapeHtml(task.itemNumber)}</td>
       <td>${escapeHtml(task.title)}</td>
@@ -1885,7 +1944,7 @@ function renderBatchWorkbench(activeTask) {
     </tr>
   `).join('');
   const rows = progressBatchTasks.map((task) => `
-    <button class="batch-simple-row ${batchActiveTask?.id === task.id ? 'selected' : ''}" data-pick-task="${task.id}" data-pick-view="batch" type="button">
+    <div class="batch-simple-row ${batchActiveTask?.id === task.id ? 'selected' : ''}" data-pick-task="${task.id}" data-pick-view="batch" role="button" tabindex="0">
       <span class="status ${statusClass(task.status)}">${task.status}</span>
       <strong>#${task.itemNumber} ${escapeHtml(task.title)}</strong>
       <span>音频：${task.audioStatus}</span>
@@ -1894,12 +1953,14 @@ function renderBatchWorkbench(activeTask) {
       <span class="batch-reason">${task.statusReason ? escapeHtml(task.statusReason) : '无异常'}</span>
       <span class="batch-row-actions">
         ${(task.audioStatus === '已生成' && task.videoStatus !== '已合成' && (String(task.status).includes('失败') || task.videoStatus === '未合成'))
-          ? `<button class="soft" type="button" data-stop-row="true" data-continue-batch-compose="${activeBatchId}">继续</button>`
+          ? `<button class="soft" type="button" data-stop-row="true" data-continue-batch-compose="${activeBatchId}">合成视频</button>`
           : ''}
+        <button class="danger" type="button" data-stop-row="true" data-remove-task="${task.id}">删除</button>
       </span>
-    </button>
+    </div>
   `).join('');
-  const historyRows = completedBatchTasks
+  const historyRows = getProjectTasks()
+    .filter((task) => task.videoStatus === '已合成')
     .slice()
     .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
     .map((task) => `<li>#${escapeHtml(task.itemNumber)} / ${escapeHtml(task.title)} / ${escapeHtml(task.status)} / ${formatTime(task.updatedAt)}</li>`)
@@ -1916,6 +1977,7 @@ function renderBatchWorkbench(activeTask) {
             <input id="batchExcelInput" type="file" accept=".xlsx,.xls,.csv" />
             <span>上传批量文案 Excel</span>
           </label>
+          ${batchIds.length ? `<button class="danger" type="button" data-remove-batch="${activeBatchId}">取消本批文案</button>` : ''}
           <p class="batch-upload-hint">上传后可在下方折叠区查看全部批次号、标题、文案。</p>
         </div>
         ${batchIds.length ? `
@@ -1924,7 +1986,7 @@ function renderBatchWorkbench(activeTask) {
             <div class="batch-docs-wrap">
               <table class="batch-docs-table">
                 <thead><tr><th>批次编号</th><th>标题</th><th>文案</th></tr></thead>
-                <tbody>${batchDocRows || `<tr><td colspan="3">${isBatchRunning ? '批量正在执行，列表已清空等待结果...' : '当前批次没有待处理文案'}</td></tr>`}</tbody>
+                <tbody>${batchDocRows || '<tr><td colspan="3">当前批次没有待处理文案</td></tr>'}</tbody>
               </table>
             </div>
           </details>
@@ -1933,7 +1995,7 @@ function renderBatchWorkbench(activeTask) {
           <div class="batch-form-grid">
             <label>选择批次
               <select data-select-batch="true">
-                ${batchIds.map((batchId) => `<option value="${batchId}" ${batchId === activeBatchId ? 'selected' : ''}>${batchId}（${getBatchTasks(batchId).length}条）</option>`).join('')}
+                ${batchIds.map((batchId) => `<option value="${batchId}" ${batchId === activeBatchId ? 'selected' : ''}>${batchId}（${getAllBatchTasks(batchId).length}条）</option>`).join('')}
               </select>
             </label>
             <label>批量声音
@@ -1954,20 +2016,18 @@ function renderBatchWorkbench(activeTask) {
             </label>
           </div>
           <div class="batch-stats">
-            <div><span>总数</span><strong>${batchTasks.length}</strong></div>
-            <div><span>音频</span><strong>${doneAudio}/${batchTasks.length}</strong></div>
-            <div><span>字幕确认</span><strong>${confirmedCount}/${batchTasks.length}</strong></div>
-            <div><span>导出</span><strong>${doneVideo}/${batchTasks.length}</strong></div>
+            <div><span>总数</span><strong>${allBatchTasks.length}</strong></div>
+            <div><span>音频</span><strong>${doneAudio}/${allBatchTasks.length}</strong></div>
+            <div><span>字幕确认</span><strong>${confirmedCount}/${allBatchTasks.length}</strong></div>
+            <div><span>导出</span><strong>${doneVideo}/${allBatchTasks.length}</strong></div>
           </div>
           <div class="material-actions">
-            <button class="soft" type="button" data-create-batch-folders="${activeBatchId}">一键生成素材/成片文件夹</button>
-            <button class="soft" type="button" data-batch-grab-frame="${batchActiveTask?.id || ''}">抓取视频池预览</button>
-            <button class="soft" type="button" data-apply-batch-style="${activeBatchId}" data-style-source="${batchActiveTask?.id || ''}">套用当前标题/字幕样式</button>
+            <button class="primary" type="button" data-start-batch-all="${activeBatchId}">生成音频</button>
+            <button class="soft" type="button" data-batch-grab-frame="${batchActiveTask?.id || ''}">仅抓取首帧</button>
             <button class="soft" type="button" data-confirm-batch-subtitles="${activeBatchId}">确认标题和字幕样式</button>
-            <button class="soft" type="button" data-continue-batch-compose="${activeBatchId}">继续合并（不重生音频）</button>
-            <button class="primary" type="button" data-start-batch-all="${activeBatchId}">一键开始：先生成音频</button>
+            <button class="soft" type="button" data-continue-batch-compose="${activeBatchId}">合成视频</button>
           </div>
-          ${isBatchRunning ? '<p class="batch-running-tip">右侧正在合成中，请等待本轮结果。</p>' : ''}
+          ${isBatchRunning ? '<p class="batch-running-tip">后台正在合成中；左侧仍可继续上传文案、生成音频、确认字幕和调位置。</p>' : ''}
         ` : renderKitchenEmptyBridge('先上传批量文案 Excel')}
       </div>
       <div class="panel batch-preview-panel">
@@ -2251,7 +2311,7 @@ function renderAudio(activeTask) {
           ${activeTask.audioStatus === '已生成' ? `
             <p class="hint">音频出来后，先去视频合成页看预览，再确认标题和字幕样式。</p>
             <div class="material-actions">
-              <button class="soft" data-view="subtitle" type="button">去确认字幕样式</button>
+              <button class="soft" data-view="compose" type="button">去确认字幕样式</button>
               <button class="primary" data-confirm-task-subtitle="${activeTask.id}" type="button">直接确认这条字幕</button>
             </div>
           ` : ''}
@@ -2421,7 +2481,7 @@ function renderSubtitleWorkbench(activeTask) {
 }
 
 function renderCompose(activeTask) {
-  const audioTasks = getProjectTasks().filter((task) => task.audioStatus === '已生成');
+  const audioTasks = getSingleProjectTasks().filter((task) => task.audioStatus === '已生成');
   const composeTask = audioTasks.find((task) => task.id === activeTask?.id) || audioTasks[0] || null;
   const options = audioTasks.map((task) =>
     `<option value="${task.id}" ${composeTask?.id === task.id ? 'selected' : ''}>#${task.itemNumber} ${escapeHtml(task.title)}</option>`,
@@ -2441,19 +2501,18 @@ function renderCompose(activeTask) {
           <div class="compact-status-line">
             <strong>${composeTask.status}</strong>
           </div>
-          <p class="hint">${composeTask.subtitleConfirmed ? '字幕和标题样式已确认，现在可以开始自动合成。' : '先在下面预览区确认标题和字幕样式，确认后再开始自动合成。'}</p>
+          <p class="hint">${composeTask.subtitleConfirmed ? '可直接合成。' : '先确认标题和字幕样式。'}</p>
           <div class="asset-grid compact-assets">
             <div><span>音频</span><strong>${composeTask.audioStatus}</strong></div>
             <div><span>字幕确认</span><strong>${composeTask.subtitleConfirmed ? '已确认' : '待确认'}</strong></div>
             <div><span>视频</span><strong>${composeTask.videoStatus}</strong></div>
           </div>
-          <button class="${composeTask.subtitleConfirmed ? 'soft' : 'primary'}" data-confirm-task-subtitle="${composeTask.id}" type="button">${composeTask.subtitleConfirmed ? '重新确认标题和字幕样式' : '确认标题和字幕样式'}</button>
-          <button class="primary" data-compose-video="${composeTask.id}">一键自动合成</button>
-          <button class="soft" data-rematch-material="${composeTask.id}">仅重匹配素材</button>
-          <button class="soft" data-grab-frame="${composeTask.id}">仅抓首帧</button>
-          <button class="soft" data-retry-task="${composeTask.id}">重试</button>
-          <button class="danger" data-remove-task="${composeTask.id}">删除</button>
-          <button class="soft" data-view="materials">素材库</button>
+          <div class="material-actions">
+            <button class="soft" data-view="audio" type="button">生成音频</button>
+            <button class="soft" data-grab-frame="${composeTask.id}">仅抓取首帧</button>
+            <button class="${composeTask.subtitleConfirmed ? 'soft' : 'primary'}" data-confirm-task-subtitle="${composeTask.id}" type="button">确认标题和字幕样式</button>
+            <button class="primary" data-compose-video="${composeTask.id}">合成视频</button>
+          </div>
         ` : renderKitchenEmptyBridge('请先上传文案并生成音频。')}
         ${composeTask ? renderSubtitleEditorPanel(composeTask, composeTask.subtitleConfirmed ? '重新确认单条字幕' : '确认单条字幕') : ''}
         ${renderComposePreview(composeTask)}
@@ -2499,7 +2558,7 @@ function renderTaskPicker(view, tasks, activeTask, emptyText) {
 }
 
 function renderInlineComposeRecords(activeTask) {
-  const composeTasks = getProjectTasks().filter((task) => task.audioStatus === '已生成');
+  const composeTasks = getSingleProjectTasks().filter((task) => task.audioStatus === '已生成');
   const totalDone = composeTasks.filter((task) => task.videoStatus === '已合成' || String(task.status).includes('成功')).length;
   const running = composeTasks.filter((task) => String(task.status).includes('处理')).length;
   const pending = composeTasks.filter((task) => String(task.status).includes('待')).length;
@@ -2875,7 +2934,6 @@ function bindEvents() {
   });
   document.querySelectorAll('[data-subtitle-text-task]').forEach((textarea) => {
     textarea.addEventListener('change', () => updateTaskSubtitleText(textarea.dataset.subtitleTextTask, textarea.value));
-    textarea.addEventListener('blur', () => updateTaskSubtitleText(textarea.dataset.subtitleTextTask, textarea.value));
   });
   document.querySelectorAll('[data-subtitle-fold-task]').forEach((details) => {
     details.addEventListener('toggle', () => setSubtitleEditorOpen(details.dataset.subtitleFoldTask, details.open));
@@ -2888,6 +2946,9 @@ function bindEvents() {
   });
   document.querySelectorAll('[data-continue-batch-compose]').forEach((button) => {
     button.addEventListener('click', () => continueBatchCompose(button.dataset.continueBatchCompose));
+  });
+  document.querySelectorAll('[data-remove-batch]').forEach((button) => {
+    button.addEventListener('click', () => removeBatchTasks(button.dataset.removeBatch));
   });
   document.querySelectorAll('[data-start-batch-audio]').forEach((button) => {
     button.addEventListener('click', () => generateBatchAudio(button.dataset.startBatchAudio));

@@ -158,7 +158,7 @@ button {
 }
 
 .workspace {
-  padding: 20px;
+  padding: 18px 20px 20px 12px;
 }
 
 .topbar {
@@ -427,7 +427,7 @@ h2 {
 .batch-left {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  gap: 12px;
+  gap: 10px;
   min-height: 0;
 }
 
@@ -1462,11 +1462,11 @@ select:focus {
 
 .batch-simple-row {
   display: grid;
-  grid-template-columns: 88px minmax(140px, 1fr) 74px 74px 74px minmax(180px, 1fr) 70px;
-  gap: 8px;
+  grid-template-columns: 72px minmax(120px, 1.2fr) 56px 56px 56px minmax(120px, 1fr) auto;
+  gap: 6px;
   align-items: center;
   width: 100%;
-  padding: 8px 10px;
+  padding: 6px 8px;
   border: 1px solid var(--line);
   border-radius: 14px;
   background: #fff;
@@ -1482,17 +1482,25 @@ select:focus {
   justify-self: end;
   color: var(--muted);
   text-align: right;
-  font-size: 12px;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .batch-row-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: nowrap;
 }
 
-.batch-row-actions .soft {
-  min-height: 28px;
-  padding: 0 8px;
+.batch-row-actions .soft,
+.batch-row-actions .danger {
+  min-height: 24px;
+  padding: 0 6px;
+  white-space: nowrap;
+  font-size: 12px;
 }
 
 .batch-running-tip {
