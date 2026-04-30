@@ -1051,6 +1051,27 @@ h2 {
   font-weight: 800;
 }
 
+.audio-bipolar-row {
+  grid-template-columns: 54px minmax(0, 1fr);
+}
+
+.audio-bipolar-control {
+  display: grid;
+  grid-template-columns: 42px minmax(120px, 1fr) 42px;
+  gap: 8px;
+}
+
+.audio-side-label {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.audio-side-label.right {
+  text-align: right;
+}
+
 .style-card input[type="color"] {
   width: 52px;
   height: 28px;

@@ -2,6 +2,7 @@
 import './styles.css';
 
 const STORAGE_KEY = 'local_video_workbench_state_v2';
+const GENERATED_DATA_RESET_VERSION = '2026-04-30-keep-voices-2';
 
 const pipelineSteps = [
   '文案上传',
@@ -63,6 +64,32 @@ const defaultKitchenProjectConfig = {
   },
 };
 
+const defaultAudioParams = {
+  speed: 1,
+  volume: 1,
+  pitch: 0,
+  timbre: 0,
+  intensity: 0,
+  magnetic: 0,
+};
+
+const defaultTitleStyle = {
+  size: 64,
+  color: '#ffffff',
+  shadowColor: '#000000',
+  x: 50,
+  y: 18,
+  width: 72,
+};
+
+const defaultSubtitleStyle = {
+  size: 42,
+  color: '#ffffff',
+  x: 50,
+  y: 78,
+  width: 72,
+};
+
 function createEmptyInventoryBucket() {
   return { count: 0, totalDuration: 0, files: [] };
 }
@@ -96,12 +123,20 @@ const initialState = {
   workMode: 'single',
   activeTaskId: null,
   defaultVoiceId: null,
+  lastAudioParams: defaultAudioParams,
+  lastTitleStyle: defaultTitleStyle,
+  lastSubtitleStyle: defaultSubtitleStyle,
+  lastTitleHold: '8',
   batchExportFolderName: '',
   batchCount: 0,
   batchProcessingBatchId: null,
+  batchAudioParams: defaultAudioParams,
+  batchAudioParamsConfirmed: false,
+  batchAudioParamsPanelOpen: false,
   tasks: [],
   voices: [],
   operationLogs: [],
+  generatedDataResetVersion: GENERATED_DATA_RESET_VERSION,
   previewVideoUrl: '',
   noticeMessage: '',
   materialFolders: defaultMaterialFolders,
@@ -116,13 +151,58 @@ const initialState = {
 };
 
 let state = loadState();
+if (state.generatedDataResetVersion === GENERATED_DATA_RESET_VERSION) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...state, noticeMessage: '' }));
+}
+if (shouldClearGeneratedDataFromUrl()) {
+  window.history.replaceState({}, document.title, window.location.pathname);
+}
 const subtitleEditorOpenState = new Map();
+
+function shouldClearGeneratedDataFromUrl() {
+  return new URLSearchParams(window.location.search).get('clearGeneratedData') === '1';
+}
 
 function loadState() {
   const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) return initialState;
   try {
-    const saved = { ...initialState, ...JSON.parse(raw) };
+    const parsedState = JSON.parse(raw);
+    const saved = { ...initialState, ...parsedState };
+    const shouldClearGeneratedData = shouldClearGeneratedDataFromUrl()
+      || parsedState.generatedDataResetVersion !== GENERATED_DATA_RESET_VERSION;
+    if (shouldClearGeneratedData) {
+      return {
+        ...initialState,
+        projectType: saved.projectType === 'kitchen' ? 'kitchen' : 'waidan',
+        activeView: 'audio',
+        workMode: 'single',
+        defaultVoiceId: saved.defaultVoiceId || null,
+        voices: Array.isArray(saved.voices) ? saved.voices : [],
+        lastAudioParams: {
+          ...defaultAudioParams,
+          ...((saved.lastAudioParams || {})),
+        },
+        lastTitleStyle: {
+          ...defaultTitleStyle,
+          ...((saved.lastTitleStyle || {})),
+        },
+        lastSubtitleStyle: {
+          ...defaultSubtitleStyle,
+          ...((saved.lastSubtitleStyle || {})),
+        },
+        lastTitleHold: saved.lastTitleHold || '8',
+        batchAudioParams: {
+          ...defaultAudioParams,
+          ...((saved.lastAudioParams || saved.batchAudioParams || {})),
+        },
+        materialFolders: saved.materialFolders || defaultMaterialFolders,
+        kitchenProjectConfig: saved.kitchenProjectConfig || defaultKitchenProjectConfig,
+        materialInventory: saved.materialInventory || initialState.materialInventory,
+        generatedDataResetVersion: GENERATED_DATA_RESET_VERSION,
+        noticeMessage: '已清空生成记录和数据，克隆声音已保留。',
+      };
+    }
     const allowedViews = new Set(['audio', 'batch', 'compose', 'materials', 'logs']);
     const activeView = allowedViews.has(saved.activeView) ? saved.activeView : 'audio';
     const workMode = saved.workMode === 'batch' ? 'batch' : 'single';
@@ -136,6 +216,25 @@ function loadState() {
       tasks: saved.tasks.map((task) => normalizeTask(task, defaultVoiceId)),
       operationLogs: saved.operationLogs || [],
       batchProcessingBatchId: saved.batchProcessingBatchId || null,
+      lastAudioParams: {
+        ...defaultAudioParams,
+        ...((saved.lastAudioParams || {})),
+      },
+      lastTitleStyle: {
+        ...defaultTitleStyle,
+        ...((saved.lastTitleStyle || {})),
+      },
+      lastSubtitleStyle: {
+        ...defaultSubtitleStyle,
+        ...((saved.lastSubtitleStyle || {})),
+      },
+      lastTitleHold: saved.lastTitleHold || '8',
+      batchAudioParams: {
+        ...defaultAudioParams,
+        ...((saved.batchAudioParams || saved.lastAudioParams || {})),
+      },
+      batchAudioParamsConfirmed: Boolean(saved.batchAudioParamsConfirmed),
+      batchAudioParamsPanelOpen: Boolean(saved.batchAudioParamsPanelOpen),
       noticeMessage: '',
       materialFolders: saved.materialFolders || defaultMaterialFolders,
       kitchenProjectConfig: {
@@ -163,9 +262,15 @@ function normalizeTask(task, fallbackVoiceId = null) {
     projectType: task.projectType === 'kitchen' ? 'kitchen' : 'waidan',
     entryMode: task.entryMode === 'batch' ? 'batch' : 'single',
     itemNumber: task.itemNumber || `${getTodayKey()}_0001`,
-    titleStyle: { width: 72, shadowColor: '#000000', ...(task.titleStyle || { size: 64, color: '#ffffff', x: 50, y: 18 }) },
-    subtitleStyle: { width: 72, ...(task.subtitleStyle || { size: 42, color: '#ffffff', x: 50, y: 78 }) },
+    titleStyle: { ...defaultTitleStyle, ...(task.titleStyle || {}) },
+    subtitleStyle: { ...defaultSubtitleStyle, ...(task.subtitleStyle || {}) },
     selectedVoiceId: task.selectedVoiceId || fallbackVoiceId,
+    audioParams: {
+      ...defaultAudioParams,
+      ...((task.audioParams || {})),
+    },
+    audioParamsConfirmed: Boolean(task.audioParamsConfirmed),
+    audioParamsPanelOpen: Boolean(task.audioParamsPanelOpen),
     composeHistory: task.composeHistory || [],
     materialFrameUrl: task.materialFrameUrl || null,
     audioUrl: normalizeAudioUrl(task.audioUrl || ''),
@@ -211,6 +316,122 @@ function isSubtitleEditorOpen(taskId, fallback = true) {
 function setSubtitleEditorOpen(taskId, isOpen) {
   if (!taskId) return;
   subtitleEditorOpenState.set(taskId, Boolean(isOpen));
+}
+
+function clampAudioParam(key, value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return defaultAudioParams[key] ?? 0;
+  if (key === 'speed') return Math.max(0.5, Math.min(2, num));
+  if (key === 'volume') return Math.max(0, Math.min(2, num));
+  if (key === 'pitch') return Math.max(-12, Math.min(12, num));
+  if (key === 'timbre') return Math.max(-20, Math.min(20, num));
+  if (key === 'intensity') return Math.max(-20, Math.min(20, num));
+  if (key === 'magnetic') return Math.max(-20, Math.min(20, num));
+  return num;
+}
+
+function updateTaskAudioParam(taskId, key, value) {
+  const tasks = state.tasks.map((task) =>
+    task.id === taskId
+      ? {
+          ...task,
+          audioParams: {
+            ...defaultAudioParams,
+            ...(task.audioParams || {}),
+            [key]: clampAudioParam(key, value),
+          },
+          audioParamsConfirmed: false,
+          updatedAt: new Date().toISOString(),
+        }
+      : task,
+  );
+  setState({ tasks });
+}
+
+function confirmTaskAudioParams(taskId) {
+  if (!taskId) return;
+  const source = state.tasks.find((task) => task.id === taskId);
+  const confirmedParams = {
+    ...defaultAudioParams,
+    ...((source || {}).audioParams || {}),
+  };
+  const tasks = state.tasks.map((task) =>
+    task.id === taskId
+      ? {
+          ...task,
+          audioParams: confirmedParams,
+          audioParamsConfirmed: true,
+          audioParamsPanelOpen: false,
+          updatedAt: new Date().toISOString(),
+        }
+      : task,
+  );
+  setState({
+    tasks,
+    lastAudioParams: confirmedParams,
+    ...(state.workMode === 'batch' ? {} : { batchAudioParams: confirmedParams, batchAudioParamsConfirmed: true }),
+  });
+  const current = tasks.find((task) => task.id === taskId);
+  if (current) {
+    addOperationLog('音频参数确认', `#${current.itemNumber} 已确认`);
+    notify(`音频参数已确认：#${current.itemNumber}`);
+  }
+}
+
+function toggleTaskAudioParamsPanel(taskId, isOpen) {
+  if (!taskId) return;
+  const tasks = state.tasks.map((task) =>
+    task.id === taskId
+      ? {
+          ...task,
+          audioParamsPanelOpen: Boolean(isOpen),
+          updatedAt: new Date().toISOString(),
+        }
+      : task,
+  );
+  setState({ tasks });
+}
+
+function updateBatchAudioParam(key, value) {
+  setState({
+    batchAudioParams: {
+      ...defaultAudioParams,
+      ...(state.batchAudioParams || {}),
+      [key]: clampAudioParam(key, value),
+    },
+    batchAudioParamsConfirmed: false,
+  });
+}
+
+function confirmBatchAudioParams() {
+  const batchId = state.tasks.find((task) => task.id === state.activeTaskId)?.batchId || '';
+  if (!batchId) return;
+  const confirmedParams = {
+    ...defaultAudioParams,
+    ...(state.batchAudioParams || {}),
+  };
+  const tasks = state.tasks.map((task) =>
+    task.batchId === batchId
+      ? {
+          ...task,
+          audioParams: confirmedParams,
+          audioParamsConfirmed: true,
+          updatedAt: new Date().toISOString(),
+        }
+      : task,
+  );
+  setState({
+    tasks,
+    lastAudioParams: confirmedParams,
+    batchAudioParamsConfirmed: true,
+    batchAudioParamsPanelOpen: false,
+  });
+  addOperationLog('批量音频参数确认', `${batchId} 已确认`);
+  notify(`本批音频参数已确认：${batchId}`);
+}
+
+function toggleBatchAudioParamsPanel(isOpen) {
+  setState({ batchAudioParamsPanelOpen: Boolean(isOpen) });
 }
 
 function getCurrentProjectMeta() {
@@ -409,6 +630,11 @@ function getNextItemSequence(day = getTodayKey()) {
 }
 
 function createTask({ batchId, index, title, body, language = 'yue' }) {
+  const inheritedAudioParams = state.workMode === 'batch'
+    ? { ...defaultAudioParams, ...(state.batchAudioParams || {}) }
+    : { ...defaultAudioParams, ...(state.lastAudioParams || {}) };
+  const inheritedTitleStyle = { ...defaultTitleStyle, ...(state.lastTitleStyle || {}) };
+  const inheritedSubtitleStyle = { ...defaultSubtitleStyle, ...(state.lastSubtitleStyle || {}) };
   const day = getTodayKey();
   const sequenceNumber = getNextItemSequence(day) + Math.max(0, Number(index || 1) - 1);
   const sequence = String(sequenceNumber).padStart(4, '0');
@@ -418,27 +644,17 @@ function createTask({ batchId, index, title, body, language = 'yue' }) {
     id,
     projectType: state.projectType,
     entryMode: state.workMode === 'batch' ? 'batch' : 'single',
+    audioParams: inheritedAudioParams,
+    audioParamsConfirmed: state.workMode === 'batch' ? Boolean(state.batchAudioParamsConfirmed) : false,
+    audioParamsPanelOpen: false,
     itemNumber,
     batchId,
     title: title.trim(),
     body: body.trim(),
     subtitleText: body.trim(),
     language: language || 'yue',
-    titleStyle: {
-      size: 64,
-      color: '#ffffff',
-      shadowColor: '#000000',
-      x: 50,
-      y: 18,
-      width: 72,
-    },
-    subtitleStyle: {
-      size: 42,
-      color: '#ffffff',
-      x: 50,
-      y: 78,
-      width: 72,
-    },
+    titleStyle: inheritedTitleStyle,
+    subtitleStyle: inheritedSubtitleStyle,
     status: '待处理',
     stepIndex: 0,
     progress: 0,
@@ -454,7 +670,7 @@ function createTask({ batchId, index, title, body, language = 'yue' }) {
     audioUrl: '',
     videoUrl: '',
     outputPath: '',
-    titleHold: '8',
+    titleHold: state.lastTitleHold || '8',
     audioTraceId: '',
     subtitleConfirmed: false,
   };
@@ -923,6 +1139,10 @@ function removeBatchTasks(batchId) {
 async function generateAudio(taskId) {
   const task = state.tasks.find((item) => item.id === taskId);
   if (!task) return;
+  if (!task.audioParamsConfirmed) {
+    notify('请先确认音频参数，再生成音频。');
+    return;
+  }
   const voiceId = task.selectedVoiceId || state.defaultVoiceId;
   if (!voiceId) {
     notify('请先在声音克隆页面完成克隆，再回来生成音频');
@@ -952,6 +1172,7 @@ async function generateAudio(taskId) {
         text: task.body,
         language: task.language || 'yue',
         voiceId,
+        audioParams: task.audioParams || defaultAudioParams,
       }),
     });
     const result = await response.json();
@@ -1171,18 +1392,33 @@ function applyBatchLanguage(batchId, language) {
 
 function confirmBatchSubtitles(batchId) {
   if (!batchId) return;
+  const sourceTask = state.tasks.find((task) => task.id === state.activeTaskId && task.batchId === batchId)
+    || state.tasks.find((task) => task.batchId === batchId)
+    || null;
+  if (!sourceTask) return;
+  const confirmedTitleStyle = { ...defaultTitleStyle, ...(sourceTask.titleStyle || {}) };
+  const confirmedSubtitleStyle = { ...defaultSubtitleStyle, ...(sourceTask.subtitleStyle || {}) };
+  const confirmedTitleHold = sourceTask.titleHold || '8';
   const tasks = state.tasks.map((task) =>
     task.batchId === batchId
       ? {
           ...task,
+          titleStyle: confirmedTitleStyle,
+          subtitleStyle: confirmedSubtitleStyle,
+          titleHold: confirmedTitleHold,
           subtitleConfirmed: true,
           updatedAt: new Date().toISOString(),
         }
       : task,
   );
-  setState({ tasks });
+  setState({
+    tasks,
+    lastTitleStyle: confirmedTitleStyle,
+    lastSubtitleStyle: confirmedSubtitleStyle,
+    lastTitleHold: confirmedTitleHold,
+  });
   addOperationLog('批量字幕确认', `${batchId} 已确认标题和字幕样式`);
-  notify(`这个批次已确认 ${tasks.filter((task) => task.batchId === batchId && task.subtitleConfirmed).length}/${tasks.filter((task) => task.batchId === batchId).length} 条。`);
+  notify(`这个批次已同步并确认 ${tasks.filter((task) => task.batchId === batchId && task.subtitleConfirmed).length}/${tasks.filter((task) => task.batchId === batchId).length} 条。`);
 }
 
 function confirmTaskSubtitle(taskId) {
@@ -1190,10 +1426,16 @@ function confirmTaskSubtitle(taskId) {
   syncTaskSubtitleFromDom(taskId);
   const current = state.tasks.find((task) => task.id === taskId);
   if (!current) return;
+  const confirmedTitleStyle = { ...defaultTitleStyle, ...(current.titleStyle || {}) };
+  const confirmedSubtitleStyle = { ...defaultSubtitleStyle, ...(current.subtitleStyle || {}) };
+  const confirmedTitleHold = current.titleHold || '8';
   const tasks = state.tasks.map((task) =>
     task.id === taskId
       ? {
           ...task,
+          titleStyle: confirmedTitleStyle,
+          subtitleStyle: confirmedSubtitleStyle,
+          titleHold: confirmedTitleHold,
           subtitleConfirmed: true,
           updatedAt: new Date().toISOString(),
         }
@@ -1209,7 +1451,13 @@ function confirmTaskSubtitle(taskId) {
     nextActiveTaskId = taskId;
     batchMessage = `当前批次已确认 ${confirmedCount}/${batchTasks.length} 条。`;
   }
-  setState({ tasks, activeTaskId: nextActiveTaskId });
+  setState({
+    tasks,
+    activeTaskId: nextActiveTaskId,
+    lastTitleStyle: confirmedTitleStyle,
+    lastSubtitleStyle: confirmedSubtitleStyle,
+    lastTitleHold: confirmedTitleHold,
+  });
   addOperationLog('字幕确认', `#${current.itemNumber} 已确认标题和字幕样式`);
   notify(`这条字幕已确认。${batchMessage || '现在可以合成视频。'}`);
 }
@@ -1461,6 +1709,10 @@ async function runBatchRender(batchId, tasksToRender, runLabel = '批量合成')
 
 async function startBatchAll(batchId) {
   if (!batchId) return;
+  if (!state.batchAudioParamsConfirmed) {
+    notify('请先确认本批音频参数。');
+    return;
+  }
   let batchTasks = getBatchTasks(batchId);
   addOperationLog('批量开始', `${batchId} 开始自动执行`);
   notify(`已提交批量生成音频：${batchId}`);
@@ -1676,6 +1928,69 @@ function formatSegmentDetails(segmentDetails = []) {
     .join(' / ');
 }
 
+function renderAudioParamRows(params, scope) {
+  const values = { ...defaultAudioParams, ...(params || {}) };
+  const bind = (key) => scope === 'task'
+    ? `data-audio-param-task="${state.activeTaskId || ''}" data-audio-param-key="${key}"`
+    : `data-batch-audio-param="${key}"`;
+  const simpleRow = (label, key, min, max, step = 1) => `
+    <label class="style-row">
+      <span class="style-label">${label}</span>
+      <span class="style-control style-control-with-value">
+        <input type="range" min="${min}" max="${max}" step="${step}" value="${values[key]}" ${bind(key)} />
+        <small>${values[key]}</small>
+      </span>
+    </label>
+  `;
+  const bipolarRow = (leftLabel, rightLabel, key) => `
+    <label class="style-row audio-bipolar-row">
+      <span class="style-label audio-side-label left">${leftLabel}</span>
+      <span class="style-control style-control-with-value audio-bipolar-control">
+        <small>${values[key]}</small>
+        <input type="range" min="-20" max="20" step="1" value="${values[key]}" ${bind(key)} />
+        <span class="audio-side-label right">${rightLabel}</span>
+      </span>
+    </label>
+  `;
+  return `
+    ${simpleRow('语速', 'speed', 0.5, 2, 0.1)}
+    ${simpleRow('音量', 'volume', 0, 2, 0.1)}
+    ${simpleRow('声调', 'pitch', -12, 12, 1)}
+    ${bipolarRow('低沉', '明亮', 'timbre')}
+    ${bipolarRow('力度感', '柔和', 'intensity')}
+    ${bipolarRow('磁性', '清脆', 'magnetic')}
+  `;
+}
+
+function renderTaskAudioParamsPanel(task) {
+  if (!task) return '';
+  return `
+    <details class="panel compact-fold" data-audio-param-fold-task="${task.id}" ${task.audioParamsPanelOpen ? 'open' : ''}>
+      <summary>高级音频参数</summary>
+      <div class="style-card">
+        ${renderAudioParamRows(task.audioParams, 'task')}
+        <div class="material-actions">
+          <button class="primary" type="button" data-confirm-audio-params="${task.id}">确认音频参数</button>
+        </div>
+      </div>
+    </details>
+  `;
+}
+
+function renderBatchAudioParamsPanel() {
+  return `
+    <details class="panel compact-fold" data-batch-audio-param-fold="true" ${state.batchAudioParamsPanelOpen ? 'open' : ''}>
+      <summary>批量默认音频参数</summary>
+      <div class="style-card">
+        ${renderAudioParamRows(state.batchAudioParams, 'batch')}
+        <div class="material-actions">
+          <button class="primary" type="button" data-confirm-batch-audio-params="true">确认本批音频参数</button>
+        </div>
+      </div>
+    </details>
+  `;
+}
+
 function render() {
   const currentProject = getCurrentProjectMeta();
   const projectTasks = state.activeView === 'batch'
@@ -1809,6 +2124,7 @@ function renderAudioWorkbench(activeTask) {
         <section class="panel">
           <p class="eyebrow">第三步</p>
           <h2>生成音频</h2>
+          ${activeTask ? renderTaskAudioParamsPanel(activeTask) : ''}
           ${projectTasks.length ? `
             <div class="compact-audio-grid">
               <div>
@@ -1992,6 +2308,7 @@ function renderBatchWorkbench(activeTask) {
           </details>
         ` : ''}
         ${batchIds.length ? `
+          ${renderBatchAudioParamsPanel()}
           <div class="batch-form-grid">
             <label>选择批次
               <select data-select-batch="true">
@@ -2907,6 +3224,24 @@ function bindEvents() {
   });
   document.querySelectorAll('[data-batch-voice]').forEach((select) => {
     select.addEventListener('change', () => applyBatchVoice(select.dataset.batchVoice, select.value));
+  });
+  document.querySelectorAll('[data-audio-param-task]').forEach((input) => {
+    input.addEventListener('input', () => updateTaskAudioParam(input.dataset.audioParamTask, input.dataset.audioParamKey, input.value));
+  });
+  document.querySelectorAll('[data-confirm-audio-params]').forEach((button) => {
+    button.addEventListener('click', () => confirmTaskAudioParams(button.dataset.confirmAudioParams));
+  });
+  document.querySelectorAll('[data-audio-param-fold-task]').forEach((details) => {
+    details.addEventListener('toggle', () => toggleTaskAudioParamsPanel(details.dataset.audioParamFoldTask, details.open));
+  });
+  document.querySelectorAll('[data-batch-audio-param]').forEach((input) => {
+    input.addEventListener('input', () => updateBatchAudioParam(input.dataset.batchAudioParam, input.value));
+  });
+  document.querySelectorAll('[data-confirm-batch-audio-params]').forEach((button) => {
+    button.addEventListener('click', confirmBatchAudioParams);
+  });
+  document.querySelectorAll('[data-batch-audio-param-fold]').forEach((details) => {
+    details.addEventListener('toggle', () => toggleBatchAudioParamsPanel(details.open));
   });
   document.querySelectorAll('[data-batch-language]').forEach((select) => {
     select.addEventListener('change', () => applyBatchLanguage(select.dataset.batchLanguage, select.value));

@@ -428,6 +428,18 @@ function withGroupId(urlText) {
   return url.toString();
 }
 
+function clampAudioParamValue(key, value, fallback) {
+  const num = Number(value);
+  const base = Number.isFinite(num) ? num : fallback;
+  if (key === 'speed') return Math.max(0.5, Math.min(2, base));
+  if (key === 'volume') return Math.max(0, Math.min(2, base));
+  if (key === 'pitch') return Math.max(-12, Math.min(12, base));
+  if (key === 'timbre') return Math.max(-20, Math.min(20, base));
+  if (key === 'intensity') return Math.max(-20, Math.min(20, base));
+  if (key === 'magnetic') return Math.max(-20, Math.min(20, base));
+  return base;
+}
+
 function minimaxFetch(url, options = {}) {
   const timeoutS = Number.parseInt(String(process.env.MINIMAX_TIMEOUT_S || '60'), 10);
   const timeoutMs = Number.isFinite(timeoutS) && timeoutS > 0 ? timeoutS * 1000 : 60000;
@@ -1091,7 +1103,8 @@ async function collectKitchenCandidates(poolKey, poolConfig, excludedNames = new
   for (const bucket of buckets) {
     const files = await listVideoFiles(bucket.dir);
     for (const name of files) {
-      if (excludedNames.has(name)) continue;
+      const sourceBase = normalizeMaterialBaseName(name);
+      if (excludedNames.has(name) || excludedNames.has(sourceBase)) continue;
       const sourcePath = path.join(bucket.dir, name);
       const duration = await getMediaDurationSeconds(sourcePath).catch(() => 0);
       if (!Number.isFinite(duration) || duration <= 0.2) continue;
@@ -1101,6 +1114,7 @@ async function collectKitchenCandidates(poolKey, poolConfig, excludedNames = new
         poolConfig,
         bucketKind: bucket.kind,
         name,
+        sourceBase,
         sourcePath,
         duration,
       });
@@ -1198,6 +1212,7 @@ async function finalizeKitchenSourceUsage(source, clipDuration, fragmentThreshol
     remainderBucket,
     remainderName,
     sourceMaterial: source.name,
+    sourceBase: base,
     poolKey: source.poolKey,
     poolLabel: source.poolConfig.label || source.poolKey,
     ...cleanupState,
@@ -1262,6 +1277,7 @@ async function prepareKitchenSource({
         remaining -= clipDuration;
         usageRecords.push(await finalizeKitchenSourceUsage(source, clipDuration, fragmentThreshold));
         excludedNames.add(source.name);
+        excludedNames.add(source.sourceBase || normalizeMaterialBaseName(source.name));
       }
       if (remaining > 0.2) {
         throw new Error(`${spec.poolConfig.label || spec.poolKey} 素材不足，还差 ${remaining.toFixed(1)}s`);
@@ -1345,6 +1361,7 @@ async function prepareKitchenSourceStrict({
       totalDuration += clipDuration;
       usageRecords.push(await finalizeKitchenSourceUsage(selected, clipDuration, fragmentThreshold));
       excludedNames.add(selected.name);
+      excludedNames.add(selected.sourceBase || normalizeMaterialBaseName(selected.name));
     }
 
     const mergedPath = path.join(tempDir, `kitchen_merged_${Date.now()}.mp4`);
@@ -1555,10 +1572,12 @@ async function composeKitchenFinalVideo({
       ...renderResult,
       usedMaterial: firstUsage.usedName || '',
       sourceMaterials: prepared.usageRecords.map((item) => item.sourceMaterial).filter(Boolean),
+      sourceBases: prepared.usageRecords.map((item) => item.sourceBase).filter(Boolean),
       segmentDetails: prepared.usageRecords.map((item) => ({
         poolKey: item.poolKey || '',
         poolLabel: item.poolLabel || item.poolKey || '',
         sourceMaterial: item.sourceMaterial || '',
+        sourceBase: item.sourceBase || '',
         clipDuration: Number(item.clipDuration || 0),
       })),
       remainingDuration: 0,
@@ -1569,6 +1588,32 @@ async function composeKitchenFinalVideo({
   } finally {
     await rm(prepared.tempDir, { recursive: true, force: true });
   }
+}
+
+async function countUniqueKitchenSourceBases(kitchenConfig = null) {
+  const config = mergeKitchenConfig(kitchenConfig);
+  const counts = {};
+  for (const [poolKey, poolConfig] of kitchenPoolEntries(config)) {
+    const baseNames = new Set();
+    for (const dirPath of [poolConfig.unusedDir, poolConfig.fragmentsDir]) {
+      const files = await listVideoFiles(dirPath);
+      for (const name of files) {
+        baseNames.add(normalizeMaterialBaseName(name));
+      }
+    }
+    counts[poolKey] = baseNames.size;
+  }
+  return counts;
+}
+
+async function countUniqueWaidanSourceBases() {
+  await runScan();
+  const inventory = await loadInventory();
+  const baseNames = new Set();
+  for (const file of [...(inventory?.unused?.files || []), ...(inventory?.fragments?.files || [])]) {
+    baseNames.add(normalizeMaterialBaseName(file.name));
+  }
+  return baseNames.size;
 }
 
 async function composeFinalVideo({
@@ -1591,7 +1636,10 @@ async function composeFinalVideo({
   const audioPath = resolvePublicFile(audioUrl, '/generated_audio/');
   const audioDuration = await getMediaDurationSeconds(audioPath);
   const sourcePool = [...(inventory?.unused?.files || []), ...(inventory?.fragments?.files || [])]
-    .filter((file) => !excludedNames.has(file.name));
+    .filter((file) => {
+      const sourceBase = normalizeMaterialBaseName(file.name);
+      return !excludedNames.has(file.name) && !excludedNames.has(sourceBase);
+    });
   const candidates = [];
   for (const file of sourcePool) {
     const sourceDir = [bucketDirs.unused, bucketDirs.fragments, bucketDirs.used]
@@ -1603,7 +1651,7 @@ async function composeFinalVideo({
       duration = await getMediaDurationSeconds(sourcePath).catch(() => 0);
     }
     if (!Number.isFinite(duration) || duration <= 0.2) continue;
-    candidates.push({ ...file, sourceDir, sourcePath, duration });
+    candidates.push({ ...file, sourceDir, sourcePath, duration, sourceBase: normalizeMaterialBaseName(file.name) });
   }
   if (!candidates.length) throw new Error('no usable materials');
   const minNeededDuration = Math.max(2, audioDuration + 0.2);
@@ -1792,6 +1840,7 @@ async function composeFinalVideo({
     sourceMaterial: source.name,
     sourceMaterials: [source.name],
     sourceBase,
+    sourceBases: [sourceBase],
     duration: targetDuration,
     remainingDuration,
     remainderBucket,
@@ -2071,6 +2120,7 @@ const server = createServer(async (req, res) => {
       const text = String(body.text || '').trim();
       const language = String(body.language || 'yue').trim();
       const voiceId = String(body.voiceId || process.env.MINIMAX_VOICE_ID || '').trim();
+      const audioParams = body.audioParams && typeof body.audioParams === 'object' ? body.audioParams : {};
       const itemNumber = String(body.itemNumber || `audio_${Date.now()}`);
       if (!text) throw new Error('text required');
       if (!voiceId) throw new Error('voiceId required');
@@ -2089,9 +2139,9 @@ const server = createServer(async (req, res) => {
         english_normalization: language === 'english',
         voice_setting: {
           voice_id: voiceId,
-          speed: 1,
-          vol: 1,
-          pitch: 0,
+          speed: clampAudioParamValue('speed', audioParams.speed, 1),
+          vol: clampAudioParamValue('volume', audioParams.volume, 1),
+          pitch: clampAudioParamValue('pitch', audioParams.pitch, 0),
         },
         audio_setting: {
           sample_rate: Number.isFinite(sampleRate) ? sampleRate : 24000,
@@ -2099,6 +2149,11 @@ const server = createServer(async (req, res) => {
           format: audioFormat,
           channel: 1,
         },
+      };
+      ttsPayload.voice_modify = {
+        pitch: clampAudioParamValue('magnetic', audioParams.magnetic, 0),
+        intensity: clampAudioParamValue('intensity', audioParams.intensity, 0),
+        timbre: clampAudioParamValue('timbre', audioParams.timbre, 0),
       };
 
       const ttsResponse = await minimaxFetch(withGroupId(ttsEndpoint), {
@@ -2202,11 +2257,26 @@ const server = createServer(async (req, res) => {
       const usedSourceNames = new Set();
       const results = [];
       if (projectType !== 'kitchen') {
-        await runScan();
-        const inventory = await loadInventory();
-        const availablePool = [...(inventory?.unused?.files || []), ...(inventory?.fragments?.files || [])];
-        if (availablePool.length < tasks.length) {
-          throw new Error(`not enough materials: need ${tasks.length}, got ${availablePool.length}`);
+        const availableUniqueBases = await countUniqueWaidanSourceBases();
+        if (availableUniqueBases < tasks.length) {
+          throw new Error(`可用独立素材源不足：本批需要 ${tasks.length} 个不同素材源，当前只有 ${availableUniqueBases} 个。请补素材后再试。`);
+        }
+      } else {
+        const kitchenCounts = await countUniqueKitchenSourceBases(body.kitchenConfig || null);
+        const requiredPoolCount = tasks.length;
+        const shortages = [];
+        const poolLabels = {
+          outdoor: '外场',
+          aerial: '航拍',
+          warehouse: '仓库内部',
+        };
+        for (const [poolKey, count] of Object.entries(kitchenCounts)) {
+          if (count < requiredPoolCount) {
+            shortages.push(`${poolLabels[poolKey] || poolKey} ${count}/${requiredPoolCount}`);
+          }
+        }
+        if (shortages.length) {
+          throw new Error(`二手厨具素材源不足：${shortages.join('，')}。同一批里每条视频都必须使用不同源素材，请补足后再试。`);
         }
       }
 
@@ -2227,13 +2297,17 @@ const server = createServer(async (req, res) => {
           exportDir,
           excludedMaterialNames: usedSourceNames,
         });
-        for (const materialName of (result.sourceMaterials || [])) {
-          if (materialName) usedSourceNames.add(materialName);
-        }
-        if (result.sourceMaterial) usedSourceNames.add(result.sourceMaterial);
-        results.push({
-          taskId: String(task.id || ''),
-          ...result,
+      for (const materialName of (result.sourceMaterials || [])) {
+        if (materialName) usedSourceNames.add(materialName);
+      }
+      for (const sourceBase of (result.sourceBases || [])) {
+        if (sourceBase) usedSourceNames.add(sourceBase);
+      }
+      if (result.sourceMaterial) usedSourceNames.add(result.sourceMaterial);
+      if (result.sourceBase) usedSourceNames.add(result.sourceBase);
+      results.push({
+        taskId: String(task.id || ''),
+        ...result,
         });
       }
 
