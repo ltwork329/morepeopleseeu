@@ -158,6 +158,8 @@ if (shouldClearGeneratedDataFromUrl()) {
   window.history.replaceState({}, document.title, window.location.pathname);
 }
 const subtitleEditorOpenState = new Map();
+let noticeTimer = null;
+let renderQueued = false;
 
 function shouldClearGeneratedDataFromUrl() {
   return new URLSearchParams(window.location.search).get('clearGeneratedData') === '1';
@@ -295,7 +297,7 @@ function addOperationLog(action, detail, level = 'info') {
   const operationLogs = [item, ...(state.operationLogs || [])].slice(0, 120);
   state = { ...state, operationLogs };
   saveState();
-  render();
+  scheduleRender();
 }
 
 function saveState() {
@@ -305,7 +307,16 @@ function saveState() {
 function setState(nextState) {
   state = { ...state, ...nextState };
   saveState();
-  render();
+  scheduleRender();
+}
+
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  window.requestAnimationFrame(() => {
+    renderQueued = false;
+    render();
+  });
 }
 
 function isSubtitleEditorOpen(taskId, fallback = true) {
@@ -542,6 +553,18 @@ function renderKitchenConfigPanel(mode = 'compose') {
 
 function notify(message) {
   setState({ noticeMessage: String(message || '') });
+  if (noticeTimer) {
+    window.clearTimeout(noticeTimer);
+    noticeTimer = null;
+  }
+  if (message) {
+    noticeTimer = window.setTimeout(() => {
+      noticeTimer = null;
+      if (state.noticeMessage) {
+        setState({ noticeMessage: '' });
+      }
+    }, 2200);
+  }
 }
 
 async function loadMaterialInventory() {
@@ -1760,6 +1783,29 @@ function selectVoice(taskId, voiceId) {
   setState({ tasks, defaultVoiceId: voiceId || state.defaultVoiceId });
 }
 
+function saveDefaultVoiceId(voiceIdInput) {
+  const voiceId = String(voiceIdInput || '').trim();
+  if (!voiceId) {
+    notify('请先输入可用的 voice_id。');
+    return;
+  }
+  setState({ defaultVoiceId: voiceId });
+  addOperationLog('保存默认 voice_id', voiceId);
+  notify('默认 voice_id 已保存。');
+}
+
+function clearDefaultVoiceId() {
+  const currentVoiceId = String(state.defaultVoiceId || '').trim();
+  const tasks = state.tasks.map((task) => (
+    task.selectedVoiceId === currentVoiceId
+      ? { ...task, selectedVoiceId: '', updatedAt: new Date().toISOString() }
+      : task
+  ));
+  setState({ defaultVoiceId: null, tasks });
+  addOperationLog('清空默认 voice_id', currentVoiceId || 'empty');
+  notify('默认 voice_id 已清空。');
+}
+
 function selectLanguage(taskId, language) {
   const tasks = state.tasks.map((task) =>
     task.id === taskId
@@ -2119,6 +2165,19 @@ function renderAudioWorkbench(activeTask) {
               </div>
             `).join('') : '<small>暂无克隆声音</small>'}
           </div>
+          <label>已有 voice_id（可手动填回）
+            <input
+              type="text"
+              data-default-voice-id-input="true"
+              value="${escapeHtml(state.defaultVoiceId || '')}"
+              placeholder="例如：voice_xxxxx"
+            />
+          </label>
+          <div class="material-actions">
+            <button class="soft" data-save-default-voice="true" type="button">保存默认 voice_id</button>
+            ${state.defaultVoiceId ? '<button class="danger" data-clear-default-voice="true" type="button">清空默认 voice_id</button>' : ''}
+          </div>
+          <small>${state.defaultVoiceId ? `当前默认 voice_id：${escapeHtml(state.defaultVoiceId)}` : '如果远端声音还在，但本地记录丢了，可以在这里手动填回。'}</small>
         </section>
 
         <section class="panel">
@@ -2219,13 +2278,13 @@ function renderTaskBoard(activeTask) {
 function renderNoticeModal() {
   if (!state.noticeMessage) return '';
   return `
-    <div class="video-modal" data-close-notice="true">
-      <div class="video-modal-card notice-modal-card" onclick="event.stopPropagation()">
-        <div class="panel-heading">
-          <h3>提示</h3>
+    <div class="toast-layer" aria-live="polite">
+      <div class="toast" onclick="event.stopPropagation()">
+        <div class="panel-heading toast-head">
+          <strong>提示</strong>
           <button class="danger" type="button" data-close-notice="true">关闭</button>
         </div>
-        <pre class="notice-text">${escapeHtml(state.noticeMessage)}</pre>
+        <span class="notice-text">${escapeHtml(state.noticeMessage)}</span>
       </div>
     </div>
   `;
@@ -3304,6 +3363,11 @@ function bindEvents() {
   document.querySelectorAll('[data-delete-voice]').forEach((button) => {
     button.addEventListener('click', () => deleteVoice(button.dataset.deleteVoice));
   });
+  document.querySelector('[data-save-default-voice]')?.addEventListener('click', () => {
+    const input = document.querySelector('[data-default-voice-id-input]');
+    saveDefaultVoiceId(input?.value || '');
+  });
+  document.querySelector('[data-clear-default-voice]')?.addEventListener('click', clearDefaultVoiceId);
   document.querySelector('[data-refresh-materials]')?.addEventListener('click', scanMaterialsFromUi);
   document.querySelector('[data-init-materials]')?.addEventListener('click', initMaterialFoldersFromUi);
   document.querySelectorAll('[data-voice-task]').forEach((select) => {
@@ -3459,7 +3523,10 @@ function layoutPreviewOverlayText(input, sourceSize, target = 'subtitle', maxLin
 
 function getVoiceName(voiceId) {
   const voice = state.voices.find((item) => item.id === voiceId) || state.voices.find((item) => item.id === state.defaultVoiceId);
-  return voice ? voice.name : '默认声音未设置';
+  if (voice) return voice.name;
+  if (voiceId) return `默认 voice_id：${voiceId}`;
+  if (state.defaultVoiceId) return `默认 voice_id：${state.defaultVoiceId}`;
+  return '默认声音未设置';
 }
 
 function escapeHtml(value) {
@@ -3480,7 +3547,7 @@ function renderAudioPreview(audioUrl) {
   `;
 }
 
-render();
+scheduleRender();
 loadMaterialInventory();
 loadMaterialFolders();
 

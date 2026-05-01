@@ -1070,8 +1070,8 @@ function normalizeMaterialBaseName(fileName) {
   return base || 'material';
 }
 
-async function createClip({ sourcePath, start, duration, outputPath }) {
-  await runExecFile(ffmpegPath, [
+async function createClip({ sourcePath, start, duration, outputPath, fastCopy = false }) {
+  const args = [
     '-y',
     '-ss',
     `${Math.max(0, start)}`,
@@ -1079,6 +1079,20 @@ async function createClip({ sourcePath, start, duration, outputPath }) {
     sourcePath,
     '-t',
     `${Math.max(0.1, duration)}`,
+  ];
+  if (fastCopy) {
+    args.push(
+      '-map',
+      '0:v:0',
+      '-c:v',
+      'copy',
+      '-an',
+      outputPath,
+    );
+    await runExecFile(ffmpegPath, args);
+    return;
+  }
+  args.push(
     '-vf',
     'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,format=yuv420p',
     '-c:v',
@@ -1091,7 +1105,8 @@ async function createClip({ sourcePath, start, duration, outputPath }) {
     'yuv420p',
     '-an',
     outputPath,
-  ]);
+  );
+  await runExecFile(ffmpegPath, args);
 }
 
 async function collectKitchenCandidates(poolKey, poolConfig, excludedNames = new Set()) {
@@ -1178,6 +1193,7 @@ async function finalizeKitchenSourceUsage(source, clipDuration, fragmentThreshol
     start: 0,
     duration: clipDuration,
     outputPath: usedPath,
+    fastCopy: true,
   });
 
   const remainingDuration = Math.max(0, source.duration - clipDuration);
@@ -1194,6 +1210,7 @@ async function finalizeKitchenSourceUsage(source, clipDuration, fragmentThreshol
       start: clipDuration,
       duration: remainingDuration,
       outputPath: remainderPath,
+      fastCopy: true,
     });
   }
 
