@@ -2,7 +2,6 @@
 import './styles.css';
 
 const STORAGE_KEY = 'local_video_workbench_state_v2';
-const GENERATED_DATA_RESET_VERSION = '2026-04-30-keep-voices-2';
 
 const pipelineSteps = [
   '文案上传',
@@ -64,27 +63,65 @@ const defaultKitchenProjectConfig = {
   },
 };
 
-const defaultAudioParams = {
-  speed: 1,
-  volume: 1,
-  pitch: 0,
-  timbre: 0,
-  intensity: 0,
-  magnetic: 0,
-};
-
 const defaultTitleStyle = {
+  fontFamily: 'system',
   size: 64,
   color: '#ffffff',
+  bold: true,
+  underline: false,
+  italic: false,
+  letterSpacing: 0,
+  lineSpacing: 0,
   shadowColor: '#000000',
+  shadowDistance: 3,
+  shadowOpacity: 0.9,
+  shadowBlur: 8,
+  shadowAngle: -45,
+  glowEnabled: false,
+  glowColor: '#ffffff',
+  glowOpacity: 0.7,
+  glowBlur: 8,
+  opacity: 1,
+  align: 'center',
+  verticalAlign: 'middle',
+  strokeColor: '#000000',
+  strokeWidth: 0,
+  scale: 1,
+  rotation: 0,
+  blendMode: 'normal',
+  curve: 0,
   x: 50,
   y: 18,
   width: 72,
 };
 
 const defaultSubtitleStyle = {
+  fontFamily: 'system',
   size: 42,
   color: '#ffffff',
+  bold: true,
+  underline: false,
+  italic: false,
+  letterSpacing: 0,
+  lineSpacing: 0,
+  shadowColor: '#000000',
+  shadowDistance: 3,
+  shadowOpacity: 0.9,
+  shadowBlur: 8,
+  shadowAngle: -45,
+  glowEnabled: false,
+  glowColor: '#ffffff',
+  glowOpacity: 0.7,
+  glowBlur: 8,
+  opacity: 1,
+  align: 'center',
+  verticalAlign: 'middle',
+  strokeColor: '#000000',
+  strokeWidth: 0,
+  scale: 1,
+  rotation: 0,
+  blendMode: 'normal',
+  curve: 0,
   x: 50,
   y: 78,
   width: 72,
@@ -123,20 +160,12 @@ const initialState = {
   workMode: 'single',
   activeTaskId: null,
   defaultVoiceId: null,
-  lastAudioParams: defaultAudioParams,
-  lastTitleStyle: defaultTitleStyle,
-  lastSubtitleStyle: defaultSubtitleStyle,
-  lastTitleHold: '8',
   batchExportFolderName: '',
   batchCount: 0,
   batchProcessingBatchId: null,
-  batchAudioParams: defaultAudioParams,
-  batchAudioParamsConfirmed: false,
-  batchAudioParamsPanelOpen: false,
   tasks: [],
   voices: [],
   operationLogs: [],
-  generatedDataResetVersion: GENERATED_DATA_RESET_VERSION,
   previewVideoUrl: '',
   noticeMessage: '',
   materialFolders: defaultMaterialFolders,
@@ -151,60 +180,13 @@ const initialState = {
 };
 
 let state = loadState();
-if (state.generatedDataResetVersion === GENERATED_DATA_RESET_VERSION) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...state, noticeMessage: '' }));
-}
-if (shouldClearGeneratedDataFromUrl()) {
-  window.history.replaceState({}, document.title, window.location.pathname);
-}
 const subtitleEditorOpenState = new Map();
-let noticeTimer = null;
-let renderQueued = false;
-
-function shouldClearGeneratedDataFromUrl() {
-  return new URLSearchParams(window.location.search).get('clearGeneratedData') === '1';
-}
 
 function loadState() {
   const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) return initialState;
   try {
-    const parsedState = JSON.parse(raw);
-    const saved = { ...initialState, ...parsedState };
-    const shouldClearGeneratedData = shouldClearGeneratedDataFromUrl()
-      || parsedState.generatedDataResetVersion !== GENERATED_DATA_RESET_VERSION;
-    if (shouldClearGeneratedData) {
-      return {
-        ...initialState,
-        projectType: saved.projectType === 'kitchen' ? 'kitchen' : 'waidan',
-        activeView: 'audio',
-        workMode: 'single',
-        defaultVoiceId: saved.defaultVoiceId || null,
-        voices: Array.isArray(saved.voices) ? saved.voices : [],
-        lastAudioParams: {
-          ...defaultAudioParams,
-          ...((saved.lastAudioParams || {})),
-        },
-        lastTitleStyle: {
-          ...defaultTitleStyle,
-          ...((saved.lastTitleStyle || {})),
-        },
-        lastSubtitleStyle: {
-          ...defaultSubtitleStyle,
-          ...((saved.lastSubtitleStyle || {})),
-        },
-        lastTitleHold: saved.lastTitleHold || '8',
-        batchAudioParams: {
-          ...defaultAudioParams,
-          ...((saved.lastAudioParams || saved.batchAudioParams || {})),
-        },
-        materialFolders: saved.materialFolders || defaultMaterialFolders,
-        kitchenProjectConfig: saved.kitchenProjectConfig || defaultKitchenProjectConfig,
-        materialInventory: saved.materialInventory || initialState.materialInventory,
-        generatedDataResetVersion: GENERATED_DATA_RESET_VERSION,
-        noticeMessage: '已清空生成记录和数据，克隆声音已保留。',
-      };
-    }
+    const saved = { ...initialState, ...JSON.parse(raw) };
     const allowedViews = new Set(['audio', 'batch', 'compose', 'materials', 'logs']);
     const activeView = allowedViews.has(saved.activeView) ? saved.activeView : 'audio';
     const workMode = saved.workMode === 'batch' ? 'batch' : 'single';
@@ -218,25 +200,6 @@ function loadState() {
       tasks: saved.tasks.map((task) => normalizeTask(task, defaultVoiceId)),
       operationLogs: saved.operationLogs || [],
       batchProcessingBatchId: saved.batchProcessingBatchId || null,
-      lastAudioParams: {
-        ...defaultAudioParams,
-        ...((saved.lastAudioParams || {})),
-      },
-      lastTitleStyle: {
-        ...defaultTitleStyle,
-        ...((saved.lastTitleStyle || {})),
-      },
-      lastSubtitleStyle: {
-        ...defaultSubtitleStyle,
-        ...((saved.lastSubtitleStyle || {})),
-      },
-      lastTitleHold: saved.lastTitleHold || '8',
-      batchAudioParams: {
-        ...defaultAudioParams,
-        ...((saved.batchAudioParams || saved.lastAudioParams || {})),
-      },
-      batchAudioParamsConfirmed: Boolean(saved.batchAudioParamsConfirmed),
-      batchAudioParamsPanelOpen: Boolean(saved.batchAudioParamsPanelOpen),
       noticeMessage: '',
       materialFolders: saved.materialFolders || defaultMaterialFolders,
       kitchenProjectConfig: {
@@ -262,17 +225,10 @@ function normalizeTask(task, fallbackVoiceId = null) {
   return {
     ...task,
     projectType: task.projectType === 'kitchen' ? 'kitchen' : 'waidan',
-    entryMode: task.entryMode === 'batch' ? 'batch' : 'single',
     itemNumber: task.itemNumber || `${getTodayKey()}_0001`,
     titleStyle: { ...defaultTitleStyle, ...(task.titleStyle || {}) },
     subtitleStyle: { ...defaultSubtitleStyle, ...(task.subtitleStyle || {}) },
     selectedVoiceId: task.selectedVoiceId || fallbackVoiceId,
-    audioParams: {
-      ...defaultAudioParams,
-      ...((task.audioParams || {})),
-    },
-    audioParamsConfirmed: Boolean(task.audioParamsConfirmed),
-    audioParamsPanelOpen: Boolean(task.audioParamsPanelOpen),
     composeHistory: task.composeHistory || [],
     materialFrameUrl: task.materialFrameUrl || null,
     audioUrl: normalizeAudioUrl(task.audioUrl || ''),
@@ -297,7 +253,7 @@ function addOperationLog(action, detail, level = 'info') {
   const operationLogs = [item, ...(state.operationLogs || [])].slice(0, 120);
   state = { ...state, operationLogs };
   saveState();
-  scheduleRender();
+  render();
 }
 
 function saveState() {
@@ -307,16 +263,7 @@ function saveState() {
 function setState(nextState) {
   state = { ...state, ...nextState };
   saveState();
-  scheduleRender();
-}
-
-function scheduleRender() {
-  if (renderQueued) return;
-  renderQueued = true;
-  window.requestAnimationFrame(() => {
-    renderQueued = false;
-    render();
-  });
+  render();
 }
 
 function isSubtitleEditorOpen(taskId, fallback = true) {
@@ -329,122 +276,6 @@ function setSubtitleEditorOpen(taskId, isOpen) {
   subtitleEditorOpenState.set(taskId, Boolean(isOpen));
 }
 
-function clampAudioParam(key, value) {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return defaultAudioParams[key] ?? 0;
-  if (key === 'speed') return Math.max(0.5, Math.min(2, num));
-  if (key === 'volume') return Math.max(0, Math.min(2, num));
-  if (key === 'pitch') return Math.max(-12, Math.min(12, num));
-  if (key === 'timbre') return Math.max(-20, Math.min(20, num));
-  if (key === 'intensity') return Math.max(-20, Math.min(20, num));
-  if (key === 'magnetic') return Math.max(-20, Math.min(20, num));
-  return num;
-}
-
-function updateTaskAudioParam(taskId, key, value) {
-  const tasks = state.tasks.map((task) =>
-    task.id === taskId
-      ? {
-          ...task,
-          audioParams: {
-            ...defaultAudioParams,
-            ...(task.audioParams || {}),
-            [key]: clampAudioParam(key, value),
-          },
-          audioParamsConfirmed: false,
-          updatedAt: new Date().toISOString(),
-        }
-      : task,
-  );
-  setState({ tasks });
-}
-
-function confirmTaskAudioParams(taskId) {
-  if (!taskId) return;
-  const source = state.tasks.find((task) => task.id === taskId);
-  const confirmedParams = {
-    ...defaultAudioParams,
-    ...((source || {}).audioParams || {}),
-  };
-  const tasks = state.tasks.map((task) =>
-    task.id === taskId
-      ? {
-          ...task,
-          audioParams: confirmedParams,
-          audioParamsConfirmed: true,
-          audioParamsPanelOpen: false,
-          updatedAt: new Date().toISOString(),
-        }
-      : task,
-  );
-  setState({
-    tasks,
-    lastAudioParams: confirmedParams,
-    ...(state.workMode === 'batch' ? {} : { batchAudioParams: confirmedParams, batchAudioParamsConfirmed: true }),
-  });
-  const current = tasks.find((task) => task.id === taskId);
-  if (current) {
-    addOperationLog('音频参数确认', `#${current.itemNumber} 已确认`);
-    notify(`音频参数已确认：#${current.itemNumber}`);
-  }
-}
-
-function toggleTaskAudioParamsPanel(taskId, isOpen) {
-  if (!taskId) return;
-  const tasks = state.tasks.map((task) =>
-    task.id === taskId
-      ? {
-          ...task,
-          audioParamsPanelOpen: Boolean(isOpen),
-          updatedAt: new Date().toISOString(),
-        }
-      : task,
-  );
-  setState({ tasks });
-}
-
-function updateBatchAudioParam(key, value) {
-  setState({
-    batchAudioParams: {
-      ...defaultAudioParams,
-      ...(state.batchAudioParams || {}),
-      [key]: clampAudioParam(key, value),
-    },
-    batchAudioParamsConfirmed: false,
-  });
-}
-
-function confirmBatchAudioParams() {
-  const batchId = state.tasks.find((task) => task.id === state.activeTaskId)?.batchId || '';
-  if (!batchId) return;
-  const confirmedParams = {
-    ...defaultAudioParams,
-    ...(state.batchAudioParams || {}),
-  };
-  const tasks = state.tasks.map((task) =>
-    task.batchId === batchId
-      ? {
-          ...task,
-          audioParams: confirmedParams,
-          audioParamsConfirmed: true,
-          updatedAt: new Date().toISOString(),
-        }
-      : task,
-  );
-  setState({
-    tasks,
-    lastAudioParams: confirmedParams,
-    batchAudioParamsConfirmed: true,
-    batchAudioParamsPanelOpen: false,
-  });
-  addOperationLog('批量音频参数确认', `${batchId} 已确认`);
-  notify(`本批音频参数已确认：${batchId}`);
-}
-
-function toggleBatchAudioParamsPanel(isOpen) {
-  setState({ batchAudioParamsPanelOpen: Boolean(isOpen) });
-}
-
 function getCurrentProjectMeta() {
   return projectMeta[state.projectType] || projectMeta.waidan;
 }
@@ -455,14 +286,6 @@ function getProjectTypeLabel(projectType = state.projectType) {
 
 function getProjectTasks(projectType = state.projectType) {
   return (state.tasks || []).filter((task) => (task.projectType || 'waidan') === projectType);
-}
-
-function getSingleProjectTasks(projectType = state.projectType) {
-  return getProjectTasks(projectType).filter((task) => task.entryMode !== 'batch');
-}
-
-function getBatchProjectTasks(projectType = state.projectType) {
-  return getProjectTasks(projectType).filter((task) => task.entryMode === 'batch');
 }
 
 function renderKitchenEmptyBridge(message = '当前二手厨具项目还是空的。') {
@@ -529,9 +352,14 @@ function renderKitchenConfigPanel(mode = 'compose') {
   const config = getKitchenConfig();
   const totalRatio = Number(config.ratios.outdoor || 0) + Number(config.ratios.aerial || 0) + Number(config.ratios.warehouse || 0);
   const title = mode === 'batch' ? '二手厨具视频池配置' : '二手厨具合成配置';
+  const hint = mode === 'batch'
+    ? '批量视频会严格按这里的比例，从外场、航拍、仓库内部三个池子的可用素材各截一段再拼接。'
+    : '当前单条视频会严格按这里的比例，从外场、航拍、仓库内部三个池子的可用素材各截一段再拼接。';
   return `
     <section class="panel kitchen-config-panel">
+      <p class="eyebrow">二手厨具项目</p>
       <h3>${title}</h3>
+      <p class="hint">${hint} 预览图默认先抓外场池。</p>
       <div class="kitchen-ratio-strip">
         <label class="kitchen-inline-field">外场
           <input type="number" min="0" max="100" value="${Number(config.ratios.outdoor || 0)}" data-kitchen-ratio="outdoor" />
@@ -553,18 +381,6 @@ function renderKitchenConfigPanel(mode = 'compose') {
 
 function notify(message) {
   setState({ noticeMessage: String(message || '') });
-  if (noticeTimer) {
-    window.clearTimeout(noticeTimer);
-    noticeTimer = null;
-  }
-  if (message) {
-    noticeTimer = window.setTimeout(() => {
-      noticeTimer = null;
-      if (state.noticeMessage) {
-        setState({ noticeMessage: '' });
-      }
-    }, 2200);
-  }
 }
 
 async function loadMaterialInventory() {
@@ -653,11 +469,6 @@ function getNextItemSequence(day = getTodayKey()) {
 }
 
 function createTask({ batchId, index, title, body, language = 'yue' }) {
-  const inheritedAudioParams = state.workMode === 'batch'
-    ? { ...defaultAudioParams, ...(state.batchAudioParams || {}) }
-    : { ...defaultAudioParams, ...(state.lastAudioParams || {}) };
-  const inheritedTitleStyle = { ...defaultTitleStyle, ...(state.lastTitleStyle || {}) };
-  const inheritedSubtitleStyle = { ...defaultSubtitleStyle, ...(state.lastSubtitleStyle || {}) };
   const day = getTodayKey();
   const sequenceNumber = getNextItemSequence(day) + Math.max(0, Number(index || 1) - 1);
   const sequence = String(sequenceNumber).padStart(4, '0');
@@ -666,18 +477,14 @@ function createTask({ batchId, index, title, body, language = 'yue' }) {
   return {
     id,
     projectType: state.projectType,
-    entryMode: state.workMode === 'batch' ? 'batch' : 'single',
-    audioParams: inheritedAudioParams,
-    audioParamsConfirmed: state.workMode === 'batch' ? Boolean(state.batchAudioParamsConfirmed) : false,
-    audioParamsPanelOpen: false,
     itemNumber,
     batchId,
     title: title.trim(),
     body: body.trim(),
     subtitleText: body.trim(),
     language: language || 'yue',
-    titleStyle: inheritedTitleStyle,
-    subtitleStyle: inheritedSubtitleStyle,
+    titleStyle: { ...defaultTitleStyle },
+    subtitleStyle: { ...defaultSubtitleStyle },
     status: '待处理',
     stepIndex: 0,
     progress: 0,
@@ -693,14 +500,10 @@ function createTask({ batchId, index, title, body, language = 'yue' }) {
     audioUrl: '',
     videoUrl: '',
     outputPath: '',
-    titleHold: state.lastTitleHold || '8',
+    titleHold: '8',
     audioTraceId: '',
     subtitleConfirmed: false,
   };
-}
-
-function shouldPreserveCurrentFocus() {
-  return Boolean(state.activeTaskId);
 }
 
 function normalizeAudioUrl(audioUrl) {
@@ -871,15 +674,13 @@ function addPasteTask(event) {
     body,
   });
 
-  const preserveFocus = shouldPreserveCurrentFocus();
   setState({
     batchCount: state.batchCount + 1,
     tasks: [task, ...state.tasks],
-    activeTaskId: preserveFocus ? state.activeTaskId : task.id,
-    activeView: preserveFocus ? state.activeView : 'audio',
+    activeTaskId: task.id,
+    activeView: 'audio',
   });
   addOperationLog('文案上传', `#${task.itemNumber} ${task.title}`);
-  if (preserveFocus) notify(`已加入队列：#${task.itemNumber}`);
   event.currentTarget.reset();
 }
 
@@ -904,8 +705,6 @@ async function importExcel(event) {
   }
 
   const batchId = createBatchId();
-  const prevMode = state.workMode;
-  state.workMode = 'single';
   const tasks = validRows.map((row, index) =>
     createTask({
       batchId,
@@ -915,17 +714,14 @@ async function importExcel(event) {
       language: row.language || 'yue',
     }),
   );
-  state.workMode = prevMode;
 
-  const preserveFocus = shouldPreserveCurrentFocus();
   setState({
     batchCount: state.batchCount + 1,
     tasks: [...tasks, ...state.tasks],
-    activeTaskId: preserveFocus ? state.activeTaskId : tasks[0].id,
-    activeView: preserveFocus ? state.activeView : 'audio',
+    activeTaskId: tasks[0].id,
+    activeView: 'audio',
   });
   addOperationLog('Excel导入', `导入 ${tasks.length} 条文案`);
-  if (preserveFocus) notify(`已加入队列：${tasks.length} 条`);
   event.target.value = '';
 }
 
@@ -950,8 +746,6 @@ async function importBatchExcel(event) {
   }
 
   const batchId = createBatchId();
-  const prevMode = state.workMode;
-  state.workMode = 'batch';
   const tasks = validRows.map((row, index) =>
     createTask({
       batchId,
@@ -961,19 +755,16 @@ async function importBatchExcel(event) {
       language: row.language || 'yue',
     }),
   );
-  state.workMode = prevMode;
 
-  const preserveFocus = shouldPreserveCurrentFocus();
   setState({
     batchCount: state.batchCount + 1,
     tasks: [...tasks, ...state.tasks],
-    activeTaskId: preserveFocus ? state.activeTaskId : tasks[0].id,
-    activeView: preserveFocus ? state.activeView : 'batch',
+    activeTaskId: tasks[0].id,
+    activeView: 'batch',
     workMode: 'batch',
     batchExportFolderName: `${batchId}_videos`,
   });
   addOperationLog('批量文案导入', `${batchId} / ${tasks.length} 条`);
-  if (preserveFocus) notify(`已加入队列：${batchId} / ${tasks.length} 条`);
   event.target.value = '';
 }
 
@@ -993,7 +784,6 @@ async function addVoice(event) {
   }
 
   try {
-    notify('已提交声音克隆，请等待。');
     const dataBase64 = await fileToBase64(sampleFile);
     const response = await fetch('http://127.0.0.1:3210/api/minimax/clone-voice', {
       method: 'POST',
@@ -1143,29 +933,25 @@ function removeFailedAll() {
   addOperationLog('批量删除失败', `${failedTasks.length} 条`, 'error');
 }
 
-function removeBatchTasks(batchId) {
-  if (!batchId) return;
-  const batchTasks = state.tasks.filter((task) => task.batchId === batchId);
-  if (!batchTasks.length) return;
-  if (!confirm(`确认取消本批文案？\n${batchId} / ${batchTasks.length} 条`)) return;
-  const batchIds = [...new Set(state.tasks.map((task) => task.batchId).filter(Boolean))].filter((id) => id !== batchId);
-  const remainingTasks = state.tasks.filter((task) => task.batchId !== batchId);
-  const nextActiveTaskId = remainingTasks.find((task) => task.batchId === batchIds[0])?.id || remainingTasks[0]?.id || null;
-  setState({
-    tasks: remainingTasks,
-    activeTaskId: nextActiveTaskId,
-  });
-  addOperationLog('取消本批文案', `${batchId} / ${batchTasks.length} 条`, 'error');
-  notify(`已取消本批文案：${batchId}`);
+function clearAllTaskData() {
+  localStorage.removeItem(STORAGE_KEY);
+  state = {
+    ...initialState,
+    materialFolders: state.materialFolders || defaultMaterialFolders,
+    voices: state.voices || [],
+    defaultVoiceId: state.defaultVoiceId || null,
+    kitchenProjectConfig: state.kitchenProjectConfig || defaultKitchenProjectConfig,
+    materialInventory: state.materialInventory || initialState.materialInventory,
+  };
+  subtitleEditorOpenState.clear();
+  saveState();
+  render();
+  notify('已清空当前浏览器里的任务记录和生成状态，素材库与声音保留。');
 }
 
 async function generateAudio(taskId) {
   const task = state.tasks.find((item) => item.id === taskId);
   if (!task) return;
-  if (!task.audioParamsConfirmed) {
-    notify('请先确认音频参数，再生成音频。');
-    return;
-  }
   const voiceId = task.selectedVoiceId || state.defaultVoiceId;
   if (!voiceId) {
     notify('请先在声音克隆页面完成克隆，再回来生成音频');
@@ -1184,7 +970,6 @@ async function generateAudio(taskId) {
       : item,
   );
   setState({ tasks: pendingTasks });
-  notify(`已提交生成音频：#${task.itemNumber}`);
 
   try {
     const response = await fetch('http://127.0.0.1:3210/api/minimax/tts', {
@@ -1195,7 +980,6 @@ async function generateAudio(taskId) {
         text: task.body,
         language: task.language || 'yue',
         voiceId,
-        audioParams: task.audioParams || defaultAudioParams,
       }),
     });
     const result = await response.json();
@@ -1307,7 +1091,6 @@ async function composeVideo(taskId) {
       : item,
   );
   setState({ tasks: runningTasks });
-  notify(`已提交合成视频：#${task.itemNumber}`);
 
   try {
     const cleanAudioUrl = String(task.audioUrl).split('?')[0];
@@ -1379,10 +1162,6 @@ function getBatchTasks(batchId) {
   return getProjectTasks().filter((task) => task.batchId === batchId);
 }
 
-function getAllBatchTasks(batchId) {
-  return (state.tasks || []).filter((task) => task.batchId === batchId);
-}
-
 function applyBatchVoice(batchId, voiceId) {
   if (!batchId) return;
   const tasks = state.tasks.map((task) =>
@@ -1415,33 +1194,18 @@ function applyBatchLanguage(batchId, language) {
 
 function confirmBatchSubtitles(batchId) {
   if (!batchId) return;
-  const sourceTask = state.tasks.find((task) => task.id === state.activeTaskId && task.batchId === batchId)
-    || state.tasks.find((task) => task.batchId === batchId)
-    || null;
-  if (!sourceTask) return;
-  const confirmedTitleStyle = { ...defaultTitleStyle, ...(sourceTask.titleStyle || {}) };
-  const confirmedSubtitleStyle = { ...defaultSubtitleStyle, ...(sourceTask.subtitleStyle || {}) };
-  const confirmedTitleHold = sourceTask.titleHold || '8';
   const tasks = state.tasks.map((task) =>
     task.batchId === batchId
       ? {
           ...task,
-          titleStyle: confirmedTitleStyle,
-          subtitleStyle: confirmedSubtitleStyle,
-          titleHold: confirmedTitleHold,
           subtitleConfirmed: true,
           updatedAt: new Date().toISOString(),
         }
       : task,
   );
-  setState({
-    tasks,
-    lastTitleStyle: confirmedTitleStyle,
-    lastSubtitleStyle: confirmedSubtitleStyle,
-    lastTitleHold: confirmedTitleHold,
-  });
+  setState({ tasks });
   addOperationLog('批量字幕确认', `${batchId} 已确认标题和字幕样式`);
-  notify(`这个批次已同步并确认 ${tasks.filter((task) => task.batchId === batchId && task.subtitleConfirmed).length}/${tasks.filter((task) => task.batchId === batchId).length} 条。`);
+  notify('这个批次的标题和字幕样式已确认，可以继续导出视频。');
 }
 
 function confirmTaskSubtitle(taskId) {
@@ -1449,40 +1213,18 @@ function confirmTaskSubtitle(taskId) {
   syncTaskSubtitleFromDom(taskId);
   const current = state.tasks.find((task) => task.id === taskId);
   if (!current) return;
-  const confirmedTitleStyle = { ...defaultTitleStyle, ...(current.titleStyle || {}) };
-  const confirmedSubtitleStyle = { ...defaultSubtitleStyle, ...(current.subtitleStyle || {}) };
-  const confirmedTitleHold = current.titleHold || '8';
   const tasks = state.tasks.map((task) =>
     task.id === taskId
       ? {
           ...task,
-          titleStyle: confirmedTitleStyle,
-          subtitleStyle: confirmedSubtitleStyle,
-          titleHold: confirmedTitleHold,
           subtitleConfirmed: true,
           updatedAt: new Date().toISOString(),
         }
       : task,
   );
-  const confirmedTask = tasks.find((task) => task.id === taskId) || current;
-  const batchId = confirmedTask.batchId || '';
-  let nextActiveTaskId = state.activeTaskId;
-  let batchMessage = '';
-  if (batchId) {
-    const batchTasks = tasks.filter((task) => task.batchId === batchId);
-    const confirmedCount = batchTasks.filter((task) => task.subtitleConfirmed).length;
-    nextActiveTaskId = taskId;
-    batchMessage = `当前批次已确认 ${confirmedCount}/${batchTasks.length} 条。`;
-  }
-  setState({
-    tasks,
-    activeTaskId: nextActiveTaskId,
-    lastTitleStyle: confirmedTitleStyle,
-    lastSubtitleStyle: confirmedSubtitleStyle,
-    lastTitleHold: confirmedTitleHold,
-  });
+  setState({ tasks });
   addOperationLog('字幕确认', `#${current.itemNumber} 已确认标题和字幕样式`);
-  notify(`这条字幕已确认。${batchMessage || '现在可以合成视频。'}`);
+  notify('这条任务的标题和字幕样式已确认，可以开始合成视频。');
 }
 
 function updateTaskSubtitleText(taskId, value) {
@@ -1651,6 +1393,7 @@ async function runBatchRender(batchId, tasksToRender, runLabel = '批量合成')
       : task,
   );
   setState({ tasks: runningTasks, batchProcessingBatchId: batchId });
+  scheduleCompletedVideoSync(6000);
   try {
     const payloadTasks = tasksToRender.map((task) => ({
       id: task.id,
@@ -1697,6 +1440,7 @@ async function runBatchRender(batchId, tasksToRender, runLabel = '批量合成')
       };
     });
     setState({ tasks: nextTasks, batchProcessingBatchId: null });
+    scheduleCompletedVideoSync(1200);
     await scanMaterialsFromUi({ silent: true });
     const batchDetails = (result.results || [])
       .map((item) => {
@@ -1732,13 +1476,8 @@ async function runBatchRender(batchId, tasksToRender, runLabel = '批量合成')
 
 async function startBatchAll(batchId) {
   if (!batchId) return;
-  if (!state.batchAudioParamsConfirmed) {
-    notify('请先确认本批音频参数。');
-    return;
-  }
   let batchTasks = getBatchTasks(batchId);
   addOperationLog('批量开始', `${batchId} 开始自动执行`);
-  notify(`已提交批量生成音频：${batchId}`);
   await generateBatchAudio(batchId, { force: false });
   batchTasks = getBatchTasks(batchId);
   const pendingAudio = batchTasks.filter((task) => task.audioStatus !== '已生成' || !task.audioUrl);
@@ -1767,7 +1506,6 @@ async function continueBatchCompose(batchId) {
     return;
   }
   addOperationLog('继续合并', `${batchId} 仅重试视频合成 ${targets.length} 条`);
-  notify(`已提交批量合成视频：${batchId}`);
   await runBatchRender(batchId, targets, '继续合并');
 }
 function selectVoice(taskId, voiceId) {
@@ -1781,29 +1519,6 @@ function selectVoice(taskId, voiceId) {
       : task,
   );
   setState({ tasks, defaultVoiceId: voiceId || state.defaultVoiceId });
-}
-
-function saveDefaultVoiceId(voiceIdInput) {
-  const voiceId = String(voiceIdInput || '').trim();
-  if (!voiceId) {
-    notify('请先输入可用的 voice_id。');
-    return;
-  }
-  setState({ defaultVoiceId: voiceId });
-  addOperationLog('保存默认 voice_id', voiceId);
-  notify('默认 voice_id 已保存。');
-}
-
-function clearDefaultVoiceId() {
-  const currentVoiceId = String(state.defaultVoiceId || '').trim();
-  const tasks = state.tasks.map((task) => (
-    task.selectedVoiceId === currentVoiceId
-      ? { ...task, selectedVoiceId: '', updatedAt: new Date().toISOString() }
-      : task
-  ));
-  setState({ defaultVoiceId: null, tasks });
-  addOperationLog('清空默认 voice_id', currentVoiceId || 'empty');
-  notify('默认 voice_id 已清空。');
 }
 
 function selectLanguage(taskId, language) {
@@ -1840,12 +1555,38 @@ function updateTaskStyle(taskId, target, key, value) {
   const tasks = state.tasks.map((task) => {
     if (task.id !== taskId) return task;
     const styleKey = target === 'title' ? 'titleStyle' : 'subtitleStyle';
-    const nextValue = key === 'color' || key === 'shadowColor' ? value : Number(value);
+    let nextValue = value;
+    if (['color', 'shadowColor', 'strokeColor', 'glowColor', 'fontFamily', 'align', 'verticalAlign', 'blendMode'].includes(key)) {
+      nextValue = value;
+    } else if (key === 'glowEnabled') {
+      nextValue = value === true || value === 'true';
+    } else if (['opacity', 'shadowOpacity', 'glowOpacity', 'scale'].includes(key)) {
+      nextValue = Math.max(0, Number(value || 0)) / 100;
+    } else {
+      nextValue = Number(value);
+    }
     return {
       ...task,
       [styleKey]: {
         ...task[styleKey],
         [key]: nextValue,
+      },
+      subtitleConfirmed: false,
+      updatedAt: new Date().toISOString(),
+    };
+  });
+  setState({ tasks });
+}
+
+function toggleTaskStyleBoolean(taskId, target, key) {
+  const tasks = state.tasks.map((task) => {
+    if (task.id !== taskId) return task;
+    const styleKey = target === 'title' ? 'titleStyle' : 'subtitleStyle';
+    return {
+      ...task,
+      [styleKey]: {
+        ...task[styleKey],
+        [key]: !task[styleKey]?.[key],
       },
       subtitleConfirmed: false,
       updatedAt: new Date().toISOString(),
@@ -1961,6 +1702,181 @@ function getTaskSubtitleText(task) {
   return text || '字幕预览文字';
 }
 
+async function syncCompletedVideoStatusForTasks(taskIds = []) {
+  const uniqueIds = [...new Set((taskIds || []).filter(Boolean))];
+  if (!uniqueIds.length) return;
+  const targets = state.tasks.filter((task) =>
+    uniqueIds.includes(task.id)
+    && task.audioStatus === '已生成'
+    && task.videoStatus !== '已合成',
+  );
+  if (!targets.length) return;
+
+  let changed = false;
+  const taskMap = new Map(state.tasks.map((task) => [task.id, task]));
+  for (const task of targets) {
+    try {
+      const response = await fetch(`http://127.0.0.1:3210/api/generated/video-latest?itemNumber=${encodeURIComponent(task.itemNumber)}`);
+      if (!response.ok) continue;
+      const result = await response.json();
+      if (!result.ok || !result.videoUrl) continue;
+      const current = taskMap.get(task.id);
+      if (!current) continue;
+      taskMap.set(task.id, {
+        ...current,
+        stepIndex: pipelineSteps.length - 1,
+        progress: 100,
+        status: '成功',
+        videoStatus: '已合成',
+        statusReason: '',
+        message: `已导出：${result.videoUrl}`,
+        videoUrl: `${result.videoUrl}?ts=${Date.now()}`,
+        outputPath: result.outputPath || current.outputPath || '',
+        updatedAt: result.updatedAt || new Date().toISOString(),
+      });
+      changed = true;
+    } catch {
+      // Keep pending state when latest output is not ready yet.
+    }
+  }
+
+  if (changed) {
+    setState({ tasks: Array.from(taskMap.values()) });
+  }
+}
+
+async function reconcileTaskVideoArtifacts(taskIds = []) {
+  const uniqueIds = [...new Set((taskIds || []).filter(Boolean))];
+  if (!uniqueIds.length) return;
+  let changed = false;
+  const taskMap = new Map(state.tasks.map((task) => [task.id, task]));
+  for (const taskId of uniqueIds) {
+    const task = taskMap.get(taskId);
+    if (!task || (!task.videoUrl && !task.outputPath && task.videoStatus !== '合成中' && task.videoStatus !== '已合成')) continue;
+    try {
+      const params = new URLSearchParams({
+        itemNumber: String(task.itemNumber || ''),
+        videoUrl: String(task.videoUrl || ''),
+        outputPath: String(task.outputPath || ''),
+      });
+      const response = await fetch(`http://127.0.0.1:3210/api/generated/video-status?${params.toString()}`);
+      if (!response.ok) continue;
+      const result = await response.json();
+      if (!result.ok) continue;
+      const current = taskMap.get(task.id);
+      if (!current) continue;
+
+      if (result.exists && result.latest?.videoUrl) {
+        taskMap.set(task.id, {
+          ...current,
+          stepIndex: pipelineSteps.length - 1,
+          progress: 100,
+          status: '成功',
+          videoStatus: '已合成',
+          statusReason: '',
+          message: `已导出：${result.latest.videoUrl}`,
+          videoUrl: `${result.latest.videoUrl}?ts=${Date.now()}`,
+          outputPath: result.latest.outputPath || current.outputPath || '',
+          updatedAt: result.latest.updatedAt || current.updatedAt || new Date().toISOString(),
+        });
+        changed = true;
+        continue;
+      }
+
+      if (!result.exists && (current.videoUrl || current.outputPath || current.videoStatus === '已合成' || current.status === '成功')) {
+        taskMap.set(task.id, {
+          ...current,
+          status: '失败',
+          videoStatus: '未合成',
+          statusReason: 'file not found',
+          message: '生成记录仍在，但成片文件已不存在，请重新合成。',
+          videoUrl: '',
+          outputPath: '',
+          updatedAt: new Date().toISOString(),
+        });
+        changed = true;
+      }
+    } catch {
+      // Ignore reconciliation failure and keep current UI state.
+    }
+  }
+
+  if (changed) {
+    setState({ tasks: Array.from(taskMap.values()) });
+  }
+}
+
+let completedVideoSyncTimer = null;
+
+function scheduleCompletedVideoSync(delayMs = 1200) {
+  if (completedVideoSyncTimer) {
+    clearTimeout(completedVideoSyncTimer);
+  }
+  completedVideoSyncTimer = setTimeout(async () => {
+    completedVideoSyncTimer = null;
+    const pendingTaskIds = state.tasks
+      .filter((task) => task.audioStatus === '已生成' && task.videoStatus !== '已合成')
+      .map((task) => task.id);
+    if (!pendingTaskIds.length) return;
+    await reconcileTaskVideoArtifacts(pendingTaskIds);
+    await syncCompletedVideoStatusForTasks(pendingTaskIds);
+    const stillPending = state.tasks.some((task) => task.audioStatus === '已生成' && task.videoStatus !== '已合成');
+    if (stillPending) {
+      scheduleCompletedVideoSync(5000);
+    }
+  }, delayMs);
+}
+
+function getTaskBodyText(task) {
+  const text = String(task?.body || task?.subtitleText || '').trim();
+  return text || '暂无文案正文';
+}
+
+function resolvePreviewFontFamily(fontFamily = 'system') {
+  if (fontFamily === 'simhei') return 'SimHei, "Microsoft YaHei UI", sans-serif';
+  if (fontFamily === 'simsun') return 'SimSun, serif';
+  return '"Microsoft YaHei UI", "Microsoft YaHei", sans-serif';
+}
+
+function hexToRgba(color, alpha = 1) {
+  const safeColor = /^#[0-9a-fA-F]{6}$/.test(String(color || '')) ? String(color) : '#000000';
+  const r = Number.parseInt(safeColor.slice(1, 3), 16);
+  const g = Number.parseInt(safeColor.slice(3, 5), 16);
+  const b = Number.parseInt(safeColor.slice(5, 7), 16);
+  const safeAlpha = Math.max(0, Math.min(1, Number(alpha) || 0));
+  return `rgba(${r}, ${g}, ${b}, ${safeAlpha})`;
+}
+
+function buildPreviewTextShadow(style = {}) {
+  const shadows = [];
+  const shadowDistance = Math.max(0, Number(style.shadowDistance ?? 3));
+  if (shadowDistance) {
+    const angleRad = (Number(style.shadowAngle ?? -45) * Math.PI) / 180;
+    const x = Math.round(Math.cos(angleRad) * shadowDistance);
+    const y = Math.round(Math.sin(angleRad) * shadowDistance);
+    const blur = Math.max(0, Number(style.shadowBlur ?? 8));
+    shadows.push(`${x}px ${y}px ${blur}px ${hexToRgba(style.shadowColor || '#000000', style.shadowOpacity ?? 0.9)}`);
+  }
+  if (style.glowEnabled) {
+    const glowBlur = Math.max(2, Number(style.glowBlur ?? 8));
+    const glowColor = hexToRgba(style.glowColor || '#ffffff', style.glowOpacity ?? 0.7);
+    shadows.push(`0 0 ${glowBlur}px ${glowColor}`, `0 0 ${Math.round(glowBlur * 1.8)}px ${glowColor}`);
+  }
+  return shadows.length ? shadows.join(', ') : 'none';
+}
+
+function buildPreviewTransform(style = {}) {
+  return `translate(-50%, -50%) rotate(${Number(style.rotation || 0)}deg) skewX(${Number(style.curve || 0) / 4}deg)`;
+}
+
+function pickPreviewSubtitleWindowText(task) {
+  const fullText = getTaskSubtitleText(task);
+  const pieces = splitCueText(fullText, 12);
+  if (!pieces.length) return fullText;
+  const middleIndex = Math.min(pieces.length - 1, Math.floor(pieces.length / 2));
+  return pieces[middleIndex] || pieces[0] || fullText;
+}
+
 function formatSegmentDetails(segmentDetails = []) {
   return (segmentDetails || [])
     .filter((item) => item && (item.poolLabel || item.sourceMaterial))
@@ -1974,74 +1890,9 @@ function formatSegmentDetails(segmentDetails = []) {
     .join(' / ');
 }
 
-function renderAudioParamRows(params, scope) {
-  const values = { ...defaultAudioParams, ...(params || {}) };
-  const bind = (key) => scope === 'task'
-    ? `data-audio-param-task="${state.activeTaskId || ''}" data-audio-param-key="${key}"`
-    : `data-batch-audio-param="${key}"`;
-  const simpleRow = (label, key, min, max, step = 1) => `
-    <label class="style-row">
-      <span class="style-label">${label}</span>
-      <span class="style-control style-control-with-value">
-        <input type="range" min="${min}" max="${max}" step="${step}" value="${values[key]}" ${bind(key)} />
-        <small>${values[key]}</small>
-      </span>
-    </label>
-  `;
-  const bipolarRow = (leftLabel, rightLabel, key) => `
-    <label class="style-row audio-bipolar-row">
-      <span class="style-label audio-side-label left">${leftLabel}</span>
-      <span class="style-control style-control-with-value audio-bipolar-control">
-        <small>${values[key]}</small>
-        <input type="range" min="-20" max="20" step="1" value="${values[key]}" ${bind(key)} />
-        <span class="audio-side-label right">${rightLabel}</span>
-      </span>
-    </label>
-  `;
-  return `
-    ${simpleRow('语速', 'speed', 0.5, 2, 0.1)}
-    ${simpleRow('音量', 'volume', 0, 2, 0.1)}
-    ${simpleRow('声调', 'pitch', -12, 12, 1)}
-    ${bipolarRow('低沉', '明亮', 'timbre')}
-    ${bipolarRow('力度感', '柔和', 'intensity')}
-    ${bipolarRow('磁性', '清脆', 'magnetic')}
-  `;
-}
-
-function renderTaskAudioParamsPanel(task) {
-  if (!task) return '';
-  return `
-    <details class="panel compact-fold" data-audio-param-fold-task="${task.id}" ${task.audioParamsPanelOpen ? 'open' : ''}>
-      <summary>高级音频参数</summary>
-      <div class="style-card">
-        ${renderAudioParamRows(task.audioParams, 'task')}
-        <div class="material-actions">
-          <button class="primary" type="button" data-confirm-audio-params="${task.id}">确认音频参数</button>
-        </div>
-      </div>
-    </details>
-  `;
-}
-
-function renderBatchAudioParamsPanel() {
-  return `
-    <details class="panel compact-fold" data-batch-audio-param-fold="true" ${state.batchAudioParamsPanelOpen ? 'open' : ''}>
-      <summary>批量默认音频参数</summary>
-      <div class="style-card">
-        ${renderAudioParamRows(state.batchAudioParams, 'batch')}
-        <div class="material-actions">
-          <button class="primary" type="button" data-confirm-batch-audio-params="true">确认本批音频参数</button>
-        </div>
-      </div>
-    </details>
-  `;
-}
-
 function render() {
   const currentProject = getCurrentProjectMeta();
-  const projectTasks = state.activeView === 'batch'
-    ? getBatchProjectTasks()
-    : getSingleProjectTasks();
+  const projectTasks = getProjectTasks();
   const activeTask = projectTasks.find((task) => task.id === state.activeTaskId) || projectTasks[0] || null;
   document.querySelector('#app').innerHTML = `
     <div class="shell">
@@ -2066,6 +1917,7 @@ function render() {
         ${renderNav('batch', '批量制作')}
         ${renderNav('materials', '素材库')}
         ${renderNav('logs', '操作记录')}
+        <button class="nav danger-text" data-clear-all-tasks="true" type="button">清空全部记录</button>
         <div class="local-note">本地模式。批次号和编号自动生成。</div>
       </aside>
 
@@ -2115,7 +1967,7 @@ function renderVideoModal() {
 }
 
 function renderAudioWorkbench(activeTask) {
-  const projectTasks = getSingleProjectTasks();
+  const projectTasks = getProjectTasks();
   const taskOptions = projectTasks.map((task) =>
     `<option value="${task.id}" ${activeTask?.id === task.id ? 'selected' : ''}>#${task.itemNumber} ${escapeHtml(task.title)}</option>`,
   ).join('');
@@ -2165,25 +2017,11 @@ function renderAudioWorkbench(activeTask) {
               </div>
             `).join('') : '<small>暂无克隆声音</small>'}
           </div>
-          <label>已有 voice_id（可手动填回）
-            <input
-              type="text"
-              data-default-voice-id-input="true"
-              value="${escapeHtml(state.defaultVoiceId || '')}"
-              placeholder="例如：voice_xxxxx"
-            />
-          </label>
-          <div class="material-actions">
-            <button class="soft" data-save-default-voice="true" type="button">保存默认 voice_id</button>
-            ${state.defaultVoiceId ? '<button class="danger" data-clear-default-voice="true" type="button">清空默认 voice_id</button>' : ''}
-          </div>
-          <small>${state.defaultVoiceId ? `当前默认 voice_id：${escapeHtml(state.defaultVoiceId)}` : '如果远端声音还在，但本地记录丢了，可以在这里手动填回。'}</small>
         </section>
 
         <section class="panel">
           <p class="eyebrow">第三步</p>
           <h2>生成音频</h2>
-          ${activeTask ? renderTaskAudioParamsPanel(activeTask) : ''}
           ${projectTasks.length ? `
             <div class="compact-audio-grid">
               <div>
@@ -2224,7 +2062,7 @@ function renderAudioWorkbench(activeTask) {
 }
 
 function renderTaskBoard(activeTask) {
-  const tasks = getSingleProjectTasks();
+  const tasks = getProjectTasks();
   const doneAudio = tasks.filter((task) => task.audioStatus === '已生成');
   const pendingAudio = tasks.filter((task) => task.audioStatus !== '已生成');
   const failedCount = tasks.filter((task) => String(task.status).includes('失败')).length;
@@ -2278,40 +2116,39 @@ function renderTaskBoard(activeTask) {
 function renderNoticeModal() {
   if (!state.noticeMessage) return '';
   return `
-    <div class="toast-layer" aria-live="polite">
-      <div class="toast" onclick="event.stopPropagation()">
-        <div class="panel-heading toast-head">
-          <strong>提示</strong>
+    <div class="video-modal" data-close-notice="true">
+      <div class="video-modal-card notice-modal-card" onclick="event.stopPropagation()">
+        <div class="panel-heading">
+          <h3>提示</h3>
           <button class="danger" type="button" data-close-notice="true">关闭</button>
         </div>
-        <span class="notice-text">${escapeHtml(state.noticeMessage)}</span>
+        <pre class="notice-text">${escapeHtml(state.noticeMessage)}</pre>
       </div>
     </div>
   `;
 }
 
 function renderBatchWorkbench(activeTask) {
-  const projectTasks = getBatchProjectTasks();
+  const projectTasks = getProjectTasks();
   const batchIds = [...new Set(projectTasks.map((task) => task.batchId).filter(Boolean))];
   const activeBatchId = activeTask?.batchId || batchIds[0] || '';
-  const allBatchTasks = getAllBatchTasks(activeBatchId);
   const batchTasks = getBatchTasks(activeBatchId);
   const isBatchRunning = state.batchProcessingBatchId === activeBatchId;
-  const pendingBatchTasks = batchTasks.filter((task) => task.videoStatus !== '已合成');
+  const pendingBatchTasks = isBatchRunning ? [] : batchTasks.filter((task) => task.videoStatus !== '已合成');
   const progressBatchTasks = batchTasks.filter((task) => task.videoStatus !== '已合成');
   const completedBatchTasks = batchTasks.filter((task) => task.videoStatus === '已合成');
   const batchActiveTask =
     pendingBatchTasks.find((task) => task.id === activeTask?.id) ||
     pendingBatchTasks[0] ||
     null;
-  const doneAudio = allBatchTasks.filter((task) => task.audioStatus === '已生成').length;
-  const doneVideo = allBatchTasks.filter((task) => task.videoStatus === '已合成').length;
-  const confirmedCount = allBatchTasks.filter((task) => task.subtitleConfirmed).length;
+  const doneAudio = batchTasks.filter((task) => task.audioStatus === '已生成').length;
+  const doneVideo = completedBatchTasks.length;
+  const confirmedCount = batchTasks.filter((task) => task.subtitleConfirmed).length;
   const voiceOptions = state.voices.map((voice) =>
     `<option value="${voice.id}" ${batchActiveTask?.selectedVoiceId === voice.id ? 'selected' : ''}>${escapeHtml(voice.name)}</option>`,
   ).join('');
   const folders = state.materialFolders || defaultMaterialFolders;
-  const batchDocRows = pendingBatchTasks.map((task) => `
+  const batchDocRows = isBatchRunning ? '' : pendingBatchTasks.map((task) => `
     <tr>
       <td>${escapeHtml(task.batchId || '')} / ${escapeHtml(task.itemNumber)}</td>
       <td>${escapeHtml(task.title)}</td>
@@ -2319,7 +2156,7 @@ function renderBatchWorkbench(activeTask) {
     </tr>
   `).join('');
   const rows = progressBatchTasks.map((task) => `
-    <div class="batch-simple-row ${batchActiveTask?.id === task.id ? 'selected' : ''}" data-pick-task="${task.id}" data-pick-view="batch" role="button" tabindex="0">
+    <button class="batch-simple-row ${batchActiveTask?.id === task.id ? 'selected' : ''}" data-pick-task="${task.id}" data-pick-view="batch" type="button">
       <span class="status ${statusClass(task.status)}">${task.status}</span>
       <strong>#${task.itemNumber} ${escapeHtml(task.title)}</strong>
       <span>音频：${task.audioStatus}</span>
@@ -2328,14 +2165,12 @@ function renderBatchWorkbench(activeTask) {
       <span class="batch-reason">${task.statusReason ? escapeHtml(task.statusReason) : '无异常'}</span>
       <span class="batch-row-actions">
         ${(task.audioStatus === '已生成' && task.videoStatus !== '已合成' && (String(task.status).includes('失败') || task.videoStatus === '未合成'))
-          ? `<button class="soft" type="button" data-stop-row="true" data-continue-batch-compose="${activeBatchId}">合成视频</button>`
+          ? `<button class="soft" type="button" data-stop-row="true" data-continue-batch-compose="${activeBatchId}">继续</button>`
           : ''}
-        <button class="danger" type="button" data-stop-row="true" data-remove-task="${task.id}">删除</button>
       </span>
-    </div>
+    </button>
   `).join('');
-  const historyRows = getProjectTasks()
-    .filter((task) => task.videoStatus === '已合成')
+  const historyRows = completedBatchTasks
     .slice()
     .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
     .map((task) => `<li>#${escapeHtml(task.itemNumber)} / ${escapeHtml(task.title)} / ${escapeHtml(task.status)} / ${formatTime(task.updatedAt)}</li>`)
@@ -2352,7 +2187,6 @@ function renderBatchWorkbench(activeTask) {
             <input id="batchExcelInput" type="file" accept=".xlsx,.xls,.csv" />
             <span>上传批量文案 Excel</span>
           </label>
-          ${batchIds.length ? `<button class="danger" type="button" data-remove-batch="${activeBatchId}">取消本批文案</button>` : ''}
           <p class="batch-upload-hint">上传后可在下方折叠区查看全部批次号、标题、文案。</p>
         </div>
         ${batchIds.length ? `
@@ -2361,17 +2195,16 @@ function renderBatchWorkbench(activeTask) {
             <div class="batch-docs-wrap">
               <table class="batch-docs-table">
                 <thead><tr><th>批次编号</th><th>标题</th><th>文案</th></tr></thead>
-                <tbody>${batchDocRows || '<tr><td colspan="3">当前批次没有待处理文案</td></tr>'}</tbody>
+                <tbody>${batchDocRows || `<tr><td colspan="3">${isBatchRunning ? '批量正在执行，列表已清空等待结果...' : '当前批次没有待处理文案'}</td></tr>`}</tbody>
               </table>
             </div>
           </details>
         ` : ''}
         ${batchIds.length ? `
-          ${renderBatchAudioParamsPanel()}
           <div class="batch-form-grid">
             <label>选择批次
               <select data-select-batch="true">
-                ${batchIds.map((batchId) => `<option value="${batchId}" ${batchId === activeBatchId ? 'selected' : ''}>${batchId}（${getAllBatchTasks(batchId).length}条）</option>`).join('')}
+                ${batchIds.map((batchId) => `<option value="${batchId}" ${batchId === activeBatchId ? 'selected' : ''}>${batchId}（${getBatchTasks(batchId).length}条）</option>`).join('')}
               </select>
             </label>
             <label>批量声音
@@ -2392,18 +2225,20 @@ function renderBatchWorkbench(activeTask) {
             </label>
           </div>
           <div class="batch-stats">
-            <div><span>总数</span><strong>${allBatchTasks.length}</strong></div>
-            <div><span>音频</span><strong>${doneAudio}/${allBatchTasks.length}</strong></div>
-            <div><span>字幕确认</span><strong>${confirmedCount}/${allBatchTasks.length}</strong></div>
-            <div><span>导出</span><strong>${doneVideo}/${allBatchTasks.length}</strong></div>
+            <div><span>总数</span><strong>${batchTasks.length}</strong></div>
+            <div><span>音频</span><strong>${doneAudio}/${batchTasks.length}</strong></div>
+            <div><span>字幕确认</span><strong>${confirmedCount}/${batchTasks.length}</strong></div>
+            <div><span>导出</span><strong>${doneVideo}/${batchTasks.length}</strong></div>
           </div>
           <div class="material-actions">
-            <button class="primary" type="button" data-start-batch-all="${activeBatchId}">生成音频</button>
-            <button class="soft" type="button" data-batch-grab-frame="${batchActiveTask?.id || ''}">仅抓取首帧</button>
+            <button class="soft" type="button" data-create-batch-folders="${activeBatchId}">一键生成素材/成片文件夹</button>
+            <button class="soft" type="button" data-batch-grab-frame="${batchActiveTask?.id || ''}">抓取视频池预览</button>
+            <button class="soft" type="button" data-apply-batch-style="${activeBatchId}" data-style-source="${batchActiveTask?.id || ''}">套用当前标题/字幕样式</button>
             <button class="soft" type="button" data-confirm-batch-subtitles="${activeBatchId}">确认标题和字幕样式</button>
-            <button class="soft" type="button" data-continue-batch-compose="${activeBatchId}">合成视频</button>
+            <button class="soft" type="button" data-continue-batch-compose="${activeBatchId}">继续合并（不重生音频）</button>
+            <button class="primary" type="button" data-start-batch-all="${activeBatchId}">一键开始：先生成音频</button>
           </div>
-          ${isBatchRunning ? '<p class="batch-running-tip">后台正在合成中；左侧仍可继续上传文案、生成音频、确认字幕和调位置。</p>' : ''}
+          ${isBatchRunning ? '<p class="batch-running-tip">右侧正在合成中，请等待本轮结果。</p>' : ''}
         ` : renderKitchenEmptyBridge('先上传批量文案 Excel')}
       </div>
       <div class="panel batch-preview-panel">
@@ -2544,7 +2379,7 @@ function renderTaskDetail(task) {
       </div>
       <div class="copy-box">
         <span>文案正文</span>
-        <p>${escapeHtml(task.body)}</p>
+        <p>${escapeHtml(getTaskBodyText(task))}</p>
       </div>
     </div>
     <div class="actions">
@@ -2687,7 +2522,7 @@ function renderAudio(activeTask) {
           ${activeTask.audioStatus === '已生成' ? `
             <p class="hint">音频出来后，先去视频合成页看预览，再确认标题和字幕样式。</p>
             <div class="material-actions">
-              <button class="soft" data-view="compose" type="button">去确认字幕样式</button>
+              <button class="soft" data-view="subtitle" type="button">去确认字幕样式</button>
               <button class="primary" data-confirm-task-subtitle="${activeTask.id}" type="button">直接确认这条字幕</button>
             </div>
           ` : ''}
@@ -2857,7 +2692,7 @@ function renderSubtitleWorkbench(activeTask) {
 }
 
 function renderCompose(activeTask) {
-  const audioTasks = getSingleProjectTasks().filter((task) => task.audioStatus === '已生成');
+  const audioTasks = getProjectTasks().filter((task) => task.audioStatus === '已生成');
   const composeTask = audioTasks.find((task) => task.id === activeTask?.id) || audioTasks[0] || null;
   const options = audioTasks.map((task) =>
     `<option value="${task.id}" ${composeTask?.id === task.id ? 'selected' : ''}>#${task.itemNumber} ${escapeHtml(task.title)}</option>`,
@@ -2877,18 +2712,19 @@ function renderCompose(activeTask) {
           <div class="compact-status-line">
             <strong>${composeTask.status}</strong>
           </div>
-          <p class="hint">${composeTask.subtitleConfirmed ? '可直接合成。' : '先确认标题和字幕样式。'}</p>
+          <p class="hint">${composeTask.subtitleConfirmed ? '字幕和标题样式已确认，现在可以开始自动合成。' : '先在下面预览区确认标题和字幕样式，确认后再开始自动合成。'}</p>
           <div class="asset-grid compact-assets">
             <div><span>音频</span><strong>${composeTask.audioStatus}</strong></div>
             <div><span>字幕确认</span><strong>${composeTask.subtitleConfirmed ? '已确认' : '待确认'}</strong></div>
             <div><span>视频</span><strong>${composeTask.videoStatus}</strong></div>
           </div>
-          <div class="material-actions">
-            <button class="soft" data-view="audio" type="button">生成音频</button>
-            <button class="soft" data-grab-frame="${composeTask.id}">仅抓取首帧</button>
-            <button class="${composeTask.subtitleConfirmed ? 'soft' : 'primary'}" data-confirm-task-subtitle="${composeTask.id}" type="button">确认标题和字幕样式</button>
-            <button class="primary" data-compose-video="${composeTask.id}">合成视频</button>
-          </div>
+          <button class="${composeTask.subtitleConfirmed ? 'soft' : 'primary'}" data-confirm-task-subtitle="${composeTask.id}" type="button">${composeTask.subtitleConfirmed ? '重新确认标题和字幕样式' : '确认标题和字幕样式'}</button>
+          <button class="primary" data-compose-video="${composeTask.id}">一键自动合成</button>
+          <button class="soft" data-rematch-material="${composeTask.id}">仅重匹配素材</button>
+          <button class="soft" data-grab-frame="${composeTask.id}">仅抓首帧</button>
+          <button class="soft" data-retry-task="${composeTask.id}">重试</button>
+          <button class="danger" data-remove-task="${composeTask.id}">删除</button>
+          <button class="soft" data-view="materials">素材库</button>
         ` : renderKitchenEmptyBridge('请先上传文案并生成音频。')}
         ${composeTask ? renderSubtitleEditorPanel(composeTask, composeTask.subtitleConfirmed ? '重新确认单条字幕' : '确认单条字幕') : ''}
         ${renderComposePreview(composeTask)}
@@ -2934,7 +2770,7 @@ function renderTaskPicker(view, tasks, activeTask, emptyText) {
 }
 
 function renderInlineComposeRecords(activeTask) {
-  const composeTasks = getSingleProjectTasks().filter((task) => task.audioStatus === '已生成');
+  const composeTasks = getProjectTasks().filter((task) => task.audioStatus === '已生成');
   const totalDone = composeTasks.filter((task) => task.videoStatus === '已合成' || String(task.status).includes('成功')).length;
   const running = composeTasks.filter((task) => String(task.status).includes('处理')).length;
   const pending = composeTasks.filter((task) => String(task.status).includes('待')).length;
@@ -2987,9 +2823,28 @@ function renderComposePreview(task) {
     `;
   }
 
-  const subtitleSource = previewSubtitleSample(getTaskSubtitleText(task));
+  const subtitleSource = pickPreviewSubtitleWindowText(task);
   const titleLayout = layoutPreviewOverlayText(task.title || '', task.titleStyle?.size, 'title', 2, task.titleStyle?.width);
   const subtitleLayout = layoutPreviewOverlayText(subtitleSource, task.subtitleStyle?.size, 'subtitle', 1, task.subtitleStyle?.width);
+  const renderPreviewStyle = (style, layout) => [
+    `left:${style.x}%`,
+    `top:${style.y}%`,
+    `width:${style.width || 72}%`,
+    `color:${style.color}`,
+    `font-size:${layout.previewSize * Number(style.scale || 1)}px`,
+    `font-family:${resolvePreviewFontFamily(style.fontFamily)}`,
+    `font-weight:${style.bold === false ? '500' : '800'}`,
+    `font-style:${style.italic ? 'italic' : 'normal'}`,
+    `text-decoration:${style.underline ? 'underline' : 'none'}`,
+    `letter-spacing:${Number(style.letterSpacing || 0)}px`,
+    `line-height:${1.15 + Number(style.lineSpacing || 0) / 100}`,
+    `opacity:${style.opacity ?? 1}`,
+    `text-align:${style.align || 'center'}`,
+    `-webkit-text-stroke:${Math.max(0, Number(style.strokeWidth || 0))}px ${style.strokeColor || '#000000'}`,
+    `text-shadow:${buildPreviewTextShadow(style)}`,
+    `mix-blend-mode:${style.blendMode || 'normal'}`,
+    `transform:${buildPreviewTransform(style)}`,
+  ].join('; ');
 
   return `
     <div class="preview-workbench">
@@ -3002,7 +2857,7 @@ function renderComposePreview(task) {
           data-x="${task.titleStyle.x}"
           data-y="${task.titleStyle.y}"
           data-width="${task.titleStyle.width || 72}"
-          style="left:${task.titleStyle.x}%; top:${task.titleStyle.y}%; width:${task.titleStyle.width || 72}%; color:${task.titleStyle.color}; font-size:${titleLayout.previewSize}px; text-shadow: 0 2px 8px ${task.titleStyle.shadowColor || '#000000'};"
+          style="${renderPreviewStyle(task.titleStyle, titleLayout)}"
         ><span class="resize-handle left" data-resize-edge="left"></span><span class="preview-text">${escapeHtml(titleLayout.text)}</span><span class="resize-handle right" data-resize-edge="right"></span></button>
         <button
           class="preview-subtitle"
@@ -3011,7 +2866,7 @@ function renderComposePreview(task) {
           data-x="${task.subtitleStyle.x}"
           data-y="${task.subtitleStyle.y}"
           data-width="${task.subtitleStyle.width || 72}"
-          style="left:${task.subtitleStyle.x}%; top:${task.subtitleStyle.y}%; width:${task.subtitleStyle.width || 72}%; color:${task.subtitleStyle.color}; font-size:${subtitleLayout.previewSize}px;"
+          style="${renderPreviewStyle(task.subtitleStyle, subtitleLayout)}"
         ><span class="resize-handle left" data-resize-edge="left"></span><span class="preview-text">${escapeHtml(subtitleLayout.text)}</span><span class="resize-handle right" data-resize-edge="right"></span></button>
       </div>
       <div>
@@ -3031,13 +2886,45 @@ function renderStyleControl(task, target, label, style) {
   const holdIndex = Math.max(0, holdMarks.indexOf(task.titleHold || '8'));
   return `
     <div class="style-card">
-      <h3>${label}调整</h3>
-      <label class="style-row"><span class="style-label">颜色</span><span class="style-control"><input type="color" value="${style.color}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="color" /></span></label>
-      ${target === 'title' ? `<label class="style-row"><span class="style-label">阴影颜色</span><span class="style-control"><input type="color" value="${style.shadowColor || '#000000'}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="shadowColor" /></span></label>` : ''}
+      <div class="style-card-head">
+        <h3>${label}调整</h3>
+        <span>接近剪映文本面板</span>
+      </div>
+      <div class="capcut-panel-section primary-section">
+        <label class="style-field wide"><span>字体</span><select data-style-task="${task.id}" data-style-target="${target}" data-style-key="fontFamily"><option value="system" ${style.fontFamily === 'system' ? 'selected' : ''}>系统</option><option value="yahei" ${style.fontFamily === 'yahei' ? 'selected' : ''}>微软雅黑</option><option value="simhei" ${style.fontFamily === 'simhei' ? 'selected' : ''}>黑体</option><option value="simsun" ${style.fontFamily === 'simsun' ? 'selected' : ''}>宋体</option></select></label>
+        <label class="style-field"><span>颜色</span><input type="color" value="${style.color}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="color" /></label>
+        <label class="style-field"><span>描边色</span><input type="color" value="${style.strokeColor || '#000000'}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="strokeColor" /></label>
+        <label class="style-field"><span>阴影色</span><input type="color" value="${style.shadowColor || '#000000'}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="shadowColor" /></label>
+      </div>
+      <div class="style-row"><span class="style-label">字重/修饰</span><span class="style-control style-toggle-group"><button class="style-toggle ${style.bold !== false ? 'active' : ''}" type="button" data-style-bool-task="${task.id}" data-style-target="${target}" data-style-key="bold">${'B'}</button><button class="style-toggle ${style.italic ? 'active' : ''}" type="button" data-style-bool-task="${task.id}" data-style-target="${target}" data-style-key="italic">${'I'}</button><button class="style-toggle ${style.underline ? 'active' : ''}" type="button" data-style-bool-task="${task.id}" data-style-target="${target}" data-style-key="underline">${'U'}</button></span></div>
       <label class="style-row"><span class="style-label">大小</span><span class="style-control"><input type="range" min="18" max="96" value="${style.size}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="size" /></span></label>
       <label class="style-row"><span class="style-label">边框宽度</span><span class="style-control"><input type="range" min="24" max="96" value="${style.width || 72}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="width" /></span></label>
       <label class="style-row"><span class="style-label">左右位置</span><span class="style-control"><input type="range" min="5" max="95" value="${style.x}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="x" /></span></label>
       <label class="style-row"><span class="style-label">上下位置</span><span class="style-control"><input type="range" min="5" max="95" value="${style.y}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="y" /></span></label>
+      <div class="capcut-align-row">
+        <label class="style-field"><span>水平对齐</span><select data-style-task="${task.id}" data-style-target="${target}" data-style-key="align"><option value="left" ${style.align === 'left' ? 'selected' : ''}>左对齐</option><option value="center" ${style.align === 'center' ? 'selected' : ''}>居中</option><option value="right" ${style.align === 'right' ? 'selected' : ''}>右对齐</option></select></label>
+        <label class="style-field"><span>透明度</span><div class="unit-input"><input type="number" min="0" max="100" value="${Math.round(Number(style.opacity ?? 1) * 100)}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="opacity" /><em>%</em></div></label>
+      </div>
+      <details class="style-fold">
+        <summary>高级样式</summary>
+        <div class="capcut-panel-section">
+          <label class="style-field"><span>字间距</span><input type="number" min="-20" max="60" value="${Number(style.letterSpacing || 0)}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="letterSpacing" /></label>
+          <label class="style-field"><span>行间距</span><input type="number" min="-20" max="80" value="${Number(style.lineSpacing || 0)}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="lineSpacing" /></label>
+          <label class="style-field"><span>描边粗细</span><input type="number" min="0" max="12" value="${Number(style.strokeWidth || 0)}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="strokeWidth" /></label>
+          <label class="style-field"><span>阴影距离</span><input type="number" min="0" max="30" value="${Number(style.shadowDistance ?? 3)}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="shadowDistance" /></label>
+          <label class="style-field"><span>阴影模糊</span><input type="number" min="0" max="40" value="${Number(style.shadowBlur ?? 8)}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="shadowBlur" /></label>
+          <label class="style-field"><span>阴影角度</span><input type="number" min="-180" max="180" value="${Number(style.shadowAngle ?? -45)}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="shadowAngle" /></label>
+          <label class="style-field"><span>阴影透明度</span><div class="unit-input"><input type="number" min="0" max="100" value="${Math.round(Number(style.shadowOpacity ?? 0.9) * 100)}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="shadowOpacity" /><em>%</em></div></label>
+          <label class="style-field"><span>发光</span><select data-style-task="${task.id}" data-style-target="${target}" data-style-key="glowEnabled"><option value="true" ${style.glowEnabled ? 'selected' : ''}>开</option><option value="false" ${style.glowEnabled ? '' : 'selected'}>关</option></select></label>
+          <label class="style-field"><span>发光颜色</span><input type="color" value="${style.glowColor || '#ffffff'}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="glowColor" /></label>
+          <label class="style-field"><span>发光模糊</span><input type="number" min="0" max="40" value="${Number(style.glowBlur ?? 8)}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="glowBlur" /></label>
+          <label class="style-field"><span>发光透明度</span><div class="unit-input"><input type="number" min="0" max="100" value="${Math.round(Number(style.glowOpacity ?? 0.7) * 100)}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="glowOpacity" /><em>%</em></div></label>
+          <label class="style-field"><span>缩放</span><div class="unit-input"><input type="number" min="50" max="200" value="${Math.round(Number(style.scale ?? 1) * 100)}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="scale" /><em>%</em></div></label>
+          <label class="style-field"><span>旋转</span><input type="number" min="-180" max="180" value="${Number(style.rotation || 0)}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="rotation" /></label>
+          <label class="style-field"><span>弯曲</span><input type="number" min="-40" max="40" value="${Number(style.curve || 0)}" data-style-task="${task.id}" data-style-target="${target}" data-style-key="curve" /></label>
+          <label class="style-field wide"><span>混合模式</span><select data-style-task="${task.id}" data-style-target="${target}" data-style-key="blendMode"><option value="normal" ${style.blendMode === 'normal' ? 'selected' : ''}>正常</option><option value="darken" ${style.blendMode === 'darken' ? 'selected' : ''}>变暗</option><option value="multiply" ${style.blendMode === 'multiply' ? 'selected' : ''}>正片叠底</option><option value="lighten" ${style.blendMode === 'lighten' ? 'selected' : ''}>变亮</option><option value="screen" ${style.blendMode === 'screen' ? 'selected' : ''}>滤色</option><option value="overlay" ${style.blendMode === 'overlay' ? 'selected' : ''}>叠加</option><option value="soft-light" ${style.blendMode === 'soft-light' ? 'selected' : ''}>柔光</option><option value="difference" ${style.blendMode === 'difference' ? 'selected' : ''}>差值</option></select></label>
+        </div>
+      </details>
       ${target === 'title' ? `
         <label class="style-row">
           <span class="style-label">标题保留时长</span>
@@ -3205,6 +3092,7 @@ function bindEvents() {
   document.querySelectorAll('[data-view]').forEach((button) => {
     button.addEventListener('click', () => setState({ activeView: button.dataset.view }));
   });
+  document.querySelector('[data-clear-all-tasks]')?.addEventListener('click', clearAllTaskData);
   document.querySelectorAll('[data-project-type]').forEach((button) => {
     button.addEventListener('click', () => {
       const projectType = button.dataset.projectType === 'kitchen' ? 'kitchen' : 'waidan';
@@ -3284,24 +3172,6 @@ function bindEvents() {
   document.querySelectorAll('[data-batch-voice]').forEach((select) => {
     select.addEventListener('change', () => applyBatchVoice(select.dataset.batchVoice, select.value));
   });
-  document.querySelectorAll('[data-audio-param-task]').forEach((input) => {
-    input.addEventListener('input', () => updateTaskAudioParam(input.dataset.audioParamTask, input.dataset.audioParamKey, input.value));
-  });
-  document.querySelectorAll('[data-confirm-audio-params]').forEach((button) => {
-    button.addEventListener('click', () => confirmTaskAudioParams(button.dataset.confirmAudioParams));
-  });
-  document.querySelectorAll('[data-audio-param-fold-task]').forEach((details) => {
-    details.addEventListener('toggle', () => toggleTaskAudioParamsPanel(details.dataset.audioParamFoldTask, details.open));
-  });
-  document.querySelectorAll('[data-batch-audio-param]').forEach((input) => {
-    input.addEventListener('input', () => updateBatchAudioParam(input.dataset.batchAudioParam, input.value));
-  });
-  document.querySelectorAll('[data-confirm-batch-audio-params]').forEach((button) => {
-    button.addEventListener('click', confirmBatchAudioParams);
-  });
-  document.querySelectorAll('[data-batch-audio-param-fold]').forEach((details) => {
-    details.addEventListener('toggle', () => toggleBatchAudioParamsPanel(details.open));
-  });
   document.querySelectorAll('[data-batch-language]').forEach((select) => {
     select.addEventListener('change', () => applyBatchLanguage(select.dataset.batchLanguage, select.value));
   });
@@ -3328,6 +3198,7 @@ function bindEvents() {
   });
   document.querySelectorAll('[data-subtitle-text-task]').forEach((textarea) => {
     textarea.addEventListener('change', () => updateTaskSubtitleText(textarea.dataset.subtitleTextTask, textarea.value));
+    textarea.addEventListener('blur', () => updateTaskSubtitleText(textarea.dataset.subtitleTextTask, textarea.value));
   });
   document.querySelectorAll('[data-subtitle-fold-task]').forEach((details) => {
     details.addEventListener('toggle', () => setSubtitleEditorOpen(details.dataset.subtitleFoldTask, details.open));
@@ -3340,9 +3211,6 @@ function bindEvents() {
   });
   document.querySelectorAll('[data-continue-batch-compose]').forEach((button) => {
     button.addEventListener('click', () => continueBatchCompose(button.dataset.continueBatchCompose));
-  });
-  document.querySelectorAll('[data-remove-batch]').forEach((button) => {
-    button.addEventListener('click', () => removeBatchTasks(button.dataset.removeBatch));
   });
   document.querySelectorAll('[data-start-batch-audio]').forEach((button) => {
     button.addEventListener('click', () => generateBatchAudio(button.dataset.startBatchAudio));
@@ -3363,11 +3231,6 @@ function bindEvents() {
   document.querySelectorAll('[data-delete-voice]').forEach((button) => {
     button.addEventListener('click', () => deleteVoice(button.dataset.deleteVoice));
   });
-  document.querySelector('[data-save-default-voice]')?.addEventListener('click', () => {
-    const input = document.querySelector('[data-default-voice-id-input]');
-    saveDefaultVoiceId(input?.value || '');
-  });
-  document.querySelector('[data-clear-default-voice]')?.addEventListener('click', clearDefaultVoiceId);
   document.querySelector('[data-refresh-materials]')?.addEventListener('click', scanMaterialsFromUi);
   document.querySelector('[data-init-materials]')?.addEventListener('click', initMaterialFoldersFromUi);
   document.querySelectorAll('[data-voice-task]').forEach((select) => {
@@ -3379,6 +3242,14 @@ function bindEvents() {
   document.querySelectorAll('[data-style-task]').forEach((input) => {
     input.addEventListener('input', () => {
       updateTaskStyle(input.dataset.styleTask, input.dataset.styleTarget, input.dataset.styleKey, input.value);
+    });
+    input.addEventListener('change', () => {
+      updateTaskStyle(input.dataset.styleTask, input.dataset.styleTarget, input.dataset.styleKey, input.value);
+    });
+  });
+  document.querySelectorAll('[data-style-bool-task]').forEach((button) => {
+    button.addEventListener('click', () => {
+      toggleTaskStyleBoolean(button.dataset.styleBoolTask, button.dataset.styleTarget, button.dataset.styleKey);
     });
   });
   document.querySelectorAll('[data-title-hold-task]').forEach((input) => {
@@ -3523,10 +3394,7 @@ function layoutPreviewOverlayText(input, sourceSize, target = 'subtitle', maxLin
 
 function getVoiceName(voiceId) {
   const voice = state.voices.find((item) => item.id === voiceId) || state.voices.find((item) => item.id === state.defaultVoiceId);
-  if (voice) return voice.name;
-  if (voiceId) return `默认 voice_id：${voiceId}`;
-  if (state.defaultVoiceId) return `默认 voice_id：${state.defaultVoiceId}`;
-  return '默认声音未设置';
+  return voice ? voice.name : '默认声音未设置';
 }
 
 function escapeHtml(value) {
@@ -3547,9 +3415,15 @@ function renderAudioPreview(audioUrl) {
   `;
 }
 
-scheduleRender();
+render();
 loadMaterialInventory();
 loadMaterialFolders();
+reconcileTaskVideoArtifacts(state.tasks.map((task) => task.id));
+syncCompletedVideoStatusForTasks(state.tasks.map((task) => task.id));
+scheduleCompletedVideoSync(1500);
+if (state.activeView === 'batch') {
+  setState({ activeView: 'audio' });
+}
 
 
 

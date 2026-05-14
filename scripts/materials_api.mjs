@@ -428,18 +428,6 @@ function withGroupId(urlText) {
   return url.toString();
 }
 
-function clampAudioParamValue(key, value, fallback) {
-  const num = Number(value);
-  const base = Number.isFinite(num) ? num : fallback;
-  if (key === 'speed') return Math.max(0.5, Math.min(2, base));
-  if (key === 'volume') return Math.max(0, Math.min(2, base));
-  if (key === 'pitch') return Math.max(-12, Math.min(12, base));
-  if (key === 'timbre') return Math.max(-20, Math.min(20, base));
-  if (key === 'intensity') return Math.max(-20, Math.min(20, base));
-  if (key === 'magnetic') return Math.max(-20, Math.min(20, base));
-  return base;
-}
-
 function minimaxFetch(url, options = {}) {
   const timeoutS = Number.parseInt(String(process.env.MINIMAX_TIMEOUT_S || '60'), 10);
   const timeoutMs = Number.isFinite(timeoutS) && timeoutS > 0 ? timeoutS * 1000 : 60000;
@@ -562,6 +550,36 @@ async function writeGeneratedSubtitles({ audioFileName, chunks }) {
   const filePath = path.join(generatedSubtitleDir, fileName);
   await writeFile(filePath, `${JSON.stringify({ chunks }, null, 2)}\n`, 'utf8');
   return `/generated_subtitles/${fileName}`;
+}
+
+async function findLatestGeneratedVideoByItemNumber(itemNumber) {
+  const prefix = String(itemNumber || '').trim();
+  if (!prefix) return null;
+  if (!existsSync(generatedVideoDir)) return null;
+  const files = await readdir(generatedVideoDir, { withFileTypes: true });
+  const matched = files
+    .filter((entry) => entry.isFile() && entry.name.startsWith(`${prefix}_`) && /\.mp4$/i.test(entry.name))
+    .map((entry) => {
+      const filePath = path.join(generatedVideoDir, entry.name);
+      const stat = statSync(filePath);
+      return {
+        fileName: entry.name,
+        filePath,
+        videoUrl: `/generated_videos/${entry.name}`,
+        outputPath: filePath,
+        updatedAt: stat.mtime.toISOString(),
+        mtimeMs: stat.mtimeMs,
+      };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return matched[0] || null;
+}
+
+function resolvePublicVideoPath(videoUrl = '') {
+  const text = String(videoUrl || '').trim().split('?')[0];
+  if (!text || !text.startsWith('/generated_videos/')) return '';
+  const fileName = path.basename(text);
+  return path.join(generatedVideoDir, fileName);
 }
 
 function safeFolderName(name, fallback = 'batch_videos') {
@@ -841,6 +859,44 @@ function wrapOverlayForStyle(input, {
   return output || text;
 }
 
+function toHexColor(color, fallback = '0x000000') {
+  const text = String(color || '').trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(text)) return text.replace('#', '0x');
+  if (/^0x[0-9a-fA-F]{6}$/.test(text)) return text;
+  return fallback;
+}
+
+function alphaToHex(alpha, fallback = 'FF') {
+  const value = Math.max(0, Math.min(1, Number(alpha)));
+  if (!Number.isFinite(value)) return fallback;
+  return Math.round(value * 255).toString(16).padStart(2, '0').toUpperCase();
+}
+
+function colorWithAlpha(color, alpha = 1, fallback = '0xFFFFFFFF') {
+  const base = toHexColor(color, fallback.slice(0, 8));
+  return `${base}${alphaToHex(alpha, fallback.slice(8) || 'FF')}`;
+}
+
+function fontPathFromStyle(style = {}) {
+  const family = String(style.fontFamily || 'system').trim().toLowerCase();
+  const candidates = {
+    simhei: ['C:/Windows/Fonts/simhei.ttf'],
+    simsun: ['C:/Windows/Fonts/simsun.ttc', 'C:/Windows/Fonts/simsun.ttc'],
+    yahei: ['C:/Windows/Fonts/msyh.ttc', 'C:/Windows/Fonts/msyh.ttf'],
+    system: ['C:/Windows/Fonts/msyh.ttc', 'C:/Windows/Fonts/msyh.ttf', 'C:/Windows/Fonts/simhei.ttf'],
+  }[family] || ['C:/Windows/Fonts/msyh.ttc', 'C:/Windows/Fonts/msyh.ttf', 'C:/Windows/Fonts/simhei.ttf'];
+  return candidates.find((filePath) => existsSync(filePath)) || pickFontPath();
+}
+
+function shadowOffsetsFromStyle(style = {}) {
+  const distance = Math.max(0, Number(style.shadowDistance ?? 3));
+  const angle = (Number(style.shadowAngle ?? -45) * Math.PI) / 180;
+  return {
+    x: Math.round(Math.cos(angle) * distance),
+    y: Math.round(Math.sin(angle) * distance),
+  };
+}
+
 async function detectSpeechWindow(filePath, durationSec) {
   if (!ffmpegPath) return { start: 0, end: durationSec };
   const total = Number(durationSec);
@@ -1038,6 +1094,57 @@ function timelineCoverageRatio(chunks, durationSec) {
   return Math.max(0, Math.min(1, lastEnd / total));
 }
 
+function compactSubtitleCompareText(text) {
+  return normalizeOverlayText(text)
+    .replace(/[\s，。！？；、,.!?;:'"“”‘’()（）\-—]/g, '')
+    .trim();
+}
+
+function subtitleChunksText(chunks = []) {
+  return compactSubtitleCompareText(
+    (chunks || [])
+      .map((chunk) => String(chunk?.line || '').trim())
+      .filter(Boolean)
+      .join(' '),
+  );
+}
+
+function remapChunksToEditedText(existingChunks = [], editedText = '', durationSec = 0) {
+  const sourceChunks = Array.isArray(existingChunks) ? existingChunks.filter((chunk) => chunk?.line) : [];
+  const nextLines = splitSubtitleSentences(editedText)
+    .flatMap((line) => splitCueText(line, 12))
+    .map((line) => normalizeOverlayText(line))
+    .filter(Boolean);
+  if (!sourceChunks.length || !nextLines.length) return [];
+
+  if (nextLines.length === sourceChunks.length) {
+    return sourceChunks.map((chunk, index) => ({
+      ...chunk,
+      line: nextLines[index],
+    }));
+  }
+
+  const total = Number(durationSec);
+  const remapped = [];
+  let sourceIndex = 0;
+  for (let lineIndex = 0; lineIndex < nextLines.length; lineIndex += 1) {
+    const remainingLines = nextLines.length - lineIndex;
+    const remainingChunks = sourceChunks.length - sourceIndex;
+    const takeCount = Math.max(1, Math.round(remainingChunks / remainingLines));
+    const group = sourceChunks.slice(sourceIndex, sourceIndex + takeCount);
+    if (!group.length) break;
+    remapped.push({
+      line: nextLines[lineIndex],
+      start: group[0].start,
+      end: group[group.length - 1].end,
+    });
+    sourceIndex += takeCount;
+  }
+
+  const normalized = normalizeTimelineChunks(remapped, total);
+  return normalized.length ? normalized : sourceChunks;
+}
+
 async function loadGeneratedSubtitleChunks(audioUrl, fallbackText = '') {
   const audioPath = resolvePublicFile(audioUrl, '/generated_audio/');
   const audioFileName = path.basename(audioPath);
@@ -1049,7 +1156,15 @@ async function loadGeneratedSubtitleChunks(audioUrl, fallbackText = '') {
       Array.isArray(payload?.chunks) ? payload.chunks.map(timedChunkFromEntry).filter(Boolean) : [],
       durationSec,
     );
-    if (chunks.length && timelineCoverageRatio(chunks, durationSec) >= 0.82) return chunks;
+    if (chunks.length && timelineCoverageRatio(chunks, durationSec) >= 0.82) {
+      const nextSubtitleText = compactSubtitleCompareText(fallbackText);
+      const savedSubtitleText = subtitleChunksText(chunks);
+      if (nextSubtitleText && nextSubtitleText !== savedSubtitleText) {
+        const remappedChunks = remapChunksToEditedText(chunks, fallbackText, durationSec);
+        if (remappedChunks.length) return remappedChunks;
+      }
+      return chunks;
+    }
   }
   const speechWindow = await detectSpeechWindow(audioPath, durationSec).catch(() => ({ start: 0, end: durationSec }));
   const fallback = buildFallbackTimedChunks(fallbackText, durationSec, speechWindow);
@@ -1070,8 +1185,8 @@ function normalizeMaterialBaseName(fileName) {
   return base || 'material';
 }
 
-async function createClip({ sourcePath, start, duration, outputPath, fastCopy = false }) {
-  const args = [
+async function createClip({ sourcePath, start, duration, outputPath }) {
+  await runExecFile(ffmpegPath, [
     '-y',
     '-ss',
     `${Math.max(0, start)}`,
@@ -1079,20 +1194,6 @@ async function createClip({ sourcePath, start, duration, outputPath, fastCopy = 
     sourcePath,
     '-t',
     `${Math.max(0.1, duration)}`,
-  ];
-  if (fastCopy) {
-    args.push(
-      '-map',
-      '0:v:0',
-      '-c:v',
-      'copy',
-      '-an',
-      outputPath,
-    );
-    await runExecFile(ffmpegPath, args);
-    return;
-  }
-  args.push(
     '-vf',
     'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,format=yuv420p',
     '-c:v',
@@ -1105,8 +1206,7 @@ async function createClip({ sourcePath, start, duration, outputPath, fastCopy = 
     'yuv420p',
     '-an',
     outputPath,
-  );
-  await runExecFile(ffmpegPath, args);
+  ]);
 }
 
 async function collectKitchenCandidates(poolKey, poolConfig, excludedNames = new Set()) {
@@ -1118,8 +1218,7 @@ async function collectKitchenCandidates(poolKey, poolConfig, excludedNames = new
   for (const bucket of buckets) {
     const files = await listVideoFiles(bucket.dir);
     for (const name of files) {
-      const sourceBase = normalizeMaterialBaseName(name);
-      if (excludedNames.has(name) || excludedNames.has(sourceBase)) continue;
+      if (excludedNames.has(name)) continue;
       const sourcePath = path.join(bucket.dir, name);
       const duration = await getMediaDurationSeconds(sourcePath).catch(() => 0);
       if (!Number.isFinite(duration) || duration <= 0.2) continue;
@@ -1129,7 +1228,6 @@ async function collectKitchenCandidates(poolKey, poolConfig, excludedNames = new
         poolConfig,
         bucketKind: bucket.kind,
         name,
-        sourceBase,
         sourcePath,
         duration,
       });
@@ -1193,7 +1291,6 @@ async function finalizeKitchenSourceUsage(source, clipDuration, fragmentThreshol
     start: 0,
     duration: clipDuration,
     outputPath: usedPath,
-    fastCopy: true,
   });
 
   const remainingDuration = Math.max(0, source.duration - clipDuration);
@@ -1210,7 +1307,6 @@ async function finalizeKitchenSourceUsage(source, clipDuration, fragmentThreshol
       start: clipDuration,
       duration: remainingDuration,
       outputPath: remainderPath,
-      fastCopy: true,
     });
   }
 
@@ -1229,7 +1325,6 @@ async function finalizeKitchenSourceUsage(source, clipDuration, fragmentThreshol
     remainderBucket,
     remainderName,
     sourceMaterial: source.name,
-    sourceBase: base,
     poolKey: source.poolKey,
     poolLabel: source.poolConfig.label || source.poolKey,
     ...cleanupState,
@@ -1294,7 +1389,6 @@ async function prepareKitchenSource({
         remaining -= clipDuration;
         usageRecords.push(await finalizeKitchenSourceUsage(source, clipDuration, fragmentThreshold));
         excludedNames.add(source.name);
-        excludedNames.add(source.sourceBase || normalizeMaterialBaseName(source.name));
       }
       if (remaining > 0.2) {
         throw new Error(`${spec.poolConfig.label || spec.poolKey} 素材不足，还差 ${remaining.toFixed(1)}s`);
@@ -1358,27 +1452,27 @@ async function prepareKitchenSourceStrict({
         throw new Error(`${spec.poolConfig.label || spec.poolKey} 没有可用素材`);
       }
 
-      const selected = pickKitchenCandidateForDuration(candidates, spec.targetDuration);
-      if (!selected) {
-        const maxDuration = Math.max(...candidates.map((item) => item.duration));
-        throw new Error(
-          `${spec.poolConfig.label || spec.poolKey} 可用素材不足，需要 ${spec.targetDuration.toFixed(1)}s，当前最长只有 ${maxDuration.toFixed(1)}s`,
-        );
+      let remaining = spec.targetDuration;
+      for (const source of candidates) {
+        if (remaining <= 0.15) break;
+        const clipDuration = Math.max(0.6, Math.min(source.duration, remaining));
+        const segmentPath = path.join(tempDir, `${spec.poolKey}_${segmentPaths.length + 1}.mp4`);
+        await createClip({
+          sourcePath: source.sourcePath,
+          start: 0,
+          duration: clipDuration,
+          outputPath: segmentPath,
+        });
+        segmentPaths.push(segmentPath);
+        totalDuration += clipDuration;
+        remaining -= clipDuration;
+        usageRecords.push(await finalizeKitchenSourceUsage(source, clipDuration, fragmentThreshold));
+        excludedNames.add(source.name);
       }
 
-      const clipDuration = Math.max(0.6, Math.min(selected.duration, spec.targetDuration));
-      const segmentPath = path.join(tempDir, `${spec.poolKey}_${segmentPaths.length + 1}.mp4`);
-      await createClip({
-        sourcePath: selected.sourcePath,
-        start: 0,
-        duration: clipDuration,
-        outputPath: segmentPath,
-      });
-      segmentPaths.push(segmentPath);
-      totalDuration += clipDuration;
-      usageRecords.push(await finalizeKitchenSourceUsage(selected, clipDuration, fragmentThreshold));
-      excludedNames.add(selected.name);
-      excludedNames.add(selected.sourceBase || normalizeMaterialBaseName(selected.name));
+      if (remaining > 0.2) {
+        throw new Error(`${spec.poolConfig.label || spec.poolKey} 素材不足，还差 ${remaining.toFixed(1)}s`);
+      }
     }
 
     const mergedPath = path.join(tempDir, `kitchen_merged_${Date.now()}.mp4`);
@@ -1417,18 +1511,25 @@ async function renderVideoWithAudioAndSubtitles({
   const outputName = `${safeItem}_${Date.now()}.mp4`;
   const outputPath = path.join(generatedVideoDir, outputName);
 
-  const fontPath = pickFontPath();
+  const titleFontPath = fontPathFromStyle(titleStyle);
+  const subtitleFontPath = fontPathFromStyle(subtitleStyle);
   const previewBaseWidth = 640;
   const outputWidth = 1080;
   const styleScale = outputWidth / previewBaseWidth;
-  let titleSize = Math.min(112, Math.max(26, Math.round(Number(titleStyle.size || 64) * styleScale)));
-  const subtitleSize = Math.min(84, Math.max(24, Math.round(Number(subtitleStyle.size || 42) * styleScale)));
+  let titleSize = Math.min(112, Math.max(26, Math.round(Number(titleStyle.size || 64) * styleScale * Math.max(0.5, Number(titleStyle.scale || 1)))));
+  const subtitleSize = Math.min(84, Math.max(24, Math.round(Number(subtitleStyle.size || 42) * styleScale * Math.max(0.5, Number(subtitleStyle.scale || 1)))));
+  const titleX = Math.max(5, Math.min(95, Number(titleStyle.x || 50)));
   const titleY = Math.max(5, Math.min(95, Number(titleStyle.y || 18)));
   const subtitleX = Math.max(5, Math.min(95, Number(subtitleStyle.x || 50)));
   const subtitleY = Math.max(5, Math.min(95, Number(subtitleStyle.y || 78)));
-  const titleColor = String(titleStyle.color || '#ffffff').replace('#', '0x');
-  const titleShadowColor = String(titleStyle.shadowColor || '#000000').replace('#', '0x');
-  const subtitleColor = String(subtitleStyle.color || '#ffffff').replace('#', '0x');
+  const titleColor = colorWithAlpha(titleStyle.color || '#ffffff', titleStyle.opacity ?? 1, '0xFFFFFFFF');
+  const titleShadowColor = colorWithAlpha(titleStyle.shadowColor || '#000000', titleStyle.shadowOpacity ?? 0.9, '0x000000FF');
+  const subtitleColor = colorWithAlpha(subtitleStyle.color || '#ffffff', subtitleStyle.opacity ?? 1, '0xFFFFFFFF');
+  const subtitleShadowColor = colorWithAlpha(subtitleStyle.shadowColor || '#000000', subtitleStyle.shadowOpacity ?? 0.9, '0x000000FF');
+  const titleStrokeColor = colorWithAlpha(titleStyle.strokeColor || '#000000', titleStyle.opacity ?? 1, '0x000000FF');
+  const subtitleStrokeColor = colorWithAlpha(subtitleStyle.strokeColor || '#000000', subtitleStyle.opacity ?? 1, '0x000000FF');
+  const titleShadowOffset = shadowOffsetsFromStyle(titleStyle);
+  const subtitleShadowOffset = shadowOffsetsFromStyle(subtitleStyle);
   const titleText = wrapOverlayForStyle(String(title || ''), {
     target: 'title',
     outputSize: titleSize,
@@ -1437,7 +1538,7 @@ async function renderVideoWithAudioAndSubtitles({
   });
   titleSize = fitTitleOutputSize(String(title || ''), titleSize, titleStyle.width);
   const subtitleXExpr = `(w*${(subtitleX / 100).toFixed(4)})-(text_w/2)`;
-  const subtitleYExpr = `(h-text_h)*${(subtitleY / 100).toFixed(4)}`;
+  const subtitleYExpr = `(h*${(subtitleY / 100).toFixed(4)})-(text_h/2)`;
   const titleHoldSec = titleHold === 'always' ? null : Math.max(0.5, Number(titleHold) || 8);
 
   const drawBase = [
@@ -1451,6 +1552,7 @@ async function renderVideoWithAudioAndSubtitles({
       const titleLines = titleText.split('\n').map((line) => line.trim()).filter(Boolean).slice(0, 2);
       const titleLineGap = Math.round(titleSize * 0.12);
       const titleBlockHeight = titleLines.length * titleSize + Math.max(0, titleLines.length - 1) * titleLineGap;
+      const titleBaseYExpr = `(h*${(titleY / 100).toFixed(4)})-(${titleBlockHeight}/2)`;
       for (let i = 0; i < titleLines.length; i += 1) {
         const titleTextPath = path.join(textTempDir, `title_${i}.txt`);
         await writeFile(titleTextPath, titleLines[i], 'utf8');
@@ -1458,13 +1560,16 @@ async function renderVideoWithAudioAndSubtitles({
           `textfile='${escapeFilterPath(titleTextPath)}'`,
           `fontsize=${titleSize}`,
           `fontcolor=${titleColor}`,
-          'x=(w-text_w)/2',
-          `y=((h-${titleBlockHeight})*${(titleY / 100).toFixed(4)})+${i * (titleSize + titleLineGap)}`,
-          'shadowx=3',
-          'shadowy=3',
+          `x=(w*${(titleX / 100).toFixed(4)})-(text_w/2)`,
+          `y=${titleBaseYExpr}+${i * (titleSize + titleLineGap)}`,
+          `shadowx=${titleShadowOffset.x}`,
+          `shadowy=${titleShadowOffset.y}`,
           `shadowcolor=${titleShadowColor}`,
+          `borderw=${Math.max(0, Number(titleStyle.strokeWidth || 0))}`,
+          `bordercolor=${titleStrokeColor}`,
         ];
-        if (fontPath) titleArgs.unshift(`fontfile='${escapeDrawText(fontPath)}'`);
+        if (titleStyle.bold === false) titleArgs.push('fontcolor_expr=fontcolor');
+        if (titleFontPath) titleArgs.unshift(`fontfile='${escapeDrawText(titleFontPath)}'`);
         if (titleHoldSec) titleArgs.push(`enable='between(t,0,${titleHoldSec.toFixed(2)})'`);
         textFilters.push(`drawtext=${titleArgs.join(':')}`);
       }
@@ -1490,12 +1595,14 @@ async function renderVideoWithAudioAndSubtitles({
         `fontcolor=${subtitleColor}`,
         `x=${subtitleXExpr}`,
         `y=${subtitleYExpr}`,
-        'shadowx=3',
-        'shadowy=3',
-        'shadowcolor=0x000000',
+        `shadowx=${subtitleShadowOffset.x}`,
+        `shadowy=${subtitleShadowOffset.y}`,
+        `shadowcolor=${subtitleShadowColor}`,
+        `borderw=${Math.max(0, Number(subtitleStyle.strokeWidth || 0))}`,
+        `bordercolor=${subtitleStrokeColor}`,
         `enable='between(t,${chunk.start.toFixed(2)},${chunk.end.toFixed(2)})'`,
       ];
-      if (fontPath) subtitleArgs.unshift(`fontfile='${escapeDrawText(fontPath)}'`);
+      if (subtitleFontPath) subtitleArgs.unshift(`fontfile='${escapeDrawText(subtitleFontPath)}'`);
       textFilters.push(`drawtext=${subtitleArgs.join(':')}`);
     }
 
@@ -1589,12 +1696,10 @@ async function composeKitchenFinalVideo({
       ...renderResult,
       usedMaterial: firstUsage.usedName || '',
       sourceMaterials: prepared.usageRecords.map((item) => item.sourceMaterial).filter(Boolean),
-      sourceBases: prepared.usageRecords.map((item) => item.sourceBase).filter(Boolean),
       segmentDetails: prepared.usageRecords.map((item) => ({
         poolKey: item.poolKey || '',
         poolLabel: item.poolLabel || item.poolKey || '',
         sourceMaterial: item.sourceMaterial || '',
-        sourceBase: item.sourceBase || '',
         clipDuration: Number(item.clipDuration || 0),
       })),
       remainingDuration: 0,
@@ -1605,32 +1710,6 @@ async function composeKitchenFinalVideo({
   } finally {
     await rm(prepared.tempDir, { recursive: true, force: true });
   }
-}
-
-async function countUniqueKitchenSourceBases(kitchenConfig = null) {
-  const config = mergeKitchenConfig(kitchenConfig);
-  const counts = {};
-  for (const [poolKey, poolConfig] of kitchenPoolEntries(config)) {
-    const baseNames = new Set();
-    for (const dirPath of [poolConfig.unusedDir, poolConfig.fragmentsDir]) {
-      const files = await listVideoFiles(dirPath);
-      for (const name of files) {
-        baseNames.add(normalizeMaterialBaseName(name));
-      }
-    }
-    counts[poolKey] = baseNames.size;
-  }
-  return counts;
-}
-
-async function countUniqueWaidanSourceBases() {
-  await runScan();
-  const inventory = await loadInventory();
-  const baseNames = new Set();
-  for (const file of [...(inventory?.unused?.files || []), ...(inventory?.fragments?.files || [])]) {
-    baseNames.add(normalizeMaterialBaseName(file.name));
-  }
-  return baseNames.size;
 }
 
 async function composeFinalVideo({
@@ -1653,10 +1732,7 @@ async function composeFinalVideo({
   const audioPath = resolvePublicFile(audioUrl, '/generated_audio/');
   const audioDuration = await getMediaDurationSeconds(audioPath);
   const sourcePool = [...(inventory?.unused?.files || []), ...(inventory?.fragments?.files || [])]
-    .filter((file) => {
-      const sourceBase = normalizeMaterialBaseName(file.name);
-      return !excludedNames.has(file.name) && !excludedNames.has(sourceBase);
-    });
+    .filter((file) => !excludedNames.has(file.name));
   const candidates = [];
   for (const file of sourcePool) {
     const sourceDir = [bucketDirs.unused, bucketDirs.fragments, bucketDirs.used]
@@ -1668,7 +1744,7 @@ async function composeFinalVideo({
       duration = await getMediaDurationSeconds(sourcePath).catch(() => 0);
     }
     if (!Number.isFinite(duration) || duration <= 0.2) continue;
-    candidates.push({ ...file, sourceDir, sourcePath, duration, sourceBase: normalizeMaterialBaseName(file.name) });
+    candidates.push({ ...file, sourceDir, sourcePath, duration });
   }
   if (!candidates.length) throw new Error('no usable materials');
   const minNeededDuration = Math.max(2, audioDuration + 0.2);
@@ -1691,18 +1767,19 @@ async function composeFinalVideo({
   const outputName = `${safeItem}_${Date.now()}.mp4`;
   const outputPath = path.join(generatedVideoDir, outputName);
 
-  const fontPath = pickFontPath();
+  const titleFontPath = fontPathFromStyle(titleStyle);
+  const subtitleFontPath = fontPathFromStyle(subtitleStyle);
   const previewBaseWidth = 640;
   const outputWidth = 1080;
   const styleScale = outputWidth / previewBaseWidth;
-  let titleSize = Math.min(112, Math.max(26, Math.round(Number(titleStyle.size || 64) * styleScale)));
-  const subtitleSize = Math.min(84, Math.max(24, Math.round(Number(subtitleStyle.size || 42) * styleScale)));
+  let titleSize = Math.min(112, Math.max(26, Math.round(Number(titleStyle.size || 64) * styleScale * Math.max(0.5, Number(titleStyle.scale || 1)))));
+  const subtitleSize = Math.min(84, Math.max(24, Math.round(Number(subtitleStyle.size || 42) * styleScale * Math.max(0.5, Number(subtitleStyle.scale || 1)))));
   const titleX = Math.max(5, Math.min(95, Number(titleStyle.x || 50)));
   const titleY = Math.max(5, Math.min(95, Number(titleStyle.y || 18)));
   const subtitleX = Math.max(5, Math.min(95, Number(subtitleStyle.x || 50)));
   const subtitleY = Math.max(5, Math.min(95, Number(subtitleStyle.y || 78)));
-  const titleColor = String(titleStyle.color || '#ffffff').replace('#', '0x');
-  const subtitleColor = String(subtitleStyle.color || '#ffffff').replace('#', '0x');
+  const titleColor = colorWithAlpha(titleStyle.color || '#ffffff', titleStyle.opacity ?? 1, '0xFFFFFFFF');
+  const subtitleColor = colorWithAlpha(subtitleStyle.color || '#ffffff', subtitleStyle.opacity ?? 1, '0xFFFFFFFF');
   const titleText = wrapOverlayForStyle(String(title || ''), {
     target: 'title',
     outputSize: titleSize,
@@ -1710,10 +1787,14 @@ async function composeFinalVideo({
     widthPct: titleStyle.width,
   });
   titleSize = fitTitleOutputSize(String(title || ''), titleSize, titleStyle.width);
-  const titleXExpr = '(w-text_w)/2';
-  const titleYExpr = `(h-text_h)*${(titleY / 100).toFixed(4)}`;
+  const titleShadowColor = colorWithAlpha(titleStyle.shadowColor || '#000000', titleStyle.shadowOpacity ?? 0.9, '0x000000FF');
+  const subtitleShadowColor = colorWithAlpha(subtitleStyle.shadowColor || '#000000', subtitleStyle.shadowOpacity ?? 0.9, '0x000000FF');
+  const titleStrokeColor = colorWithAlpha(titleStyle.strokeColor || '#000000', titleStyle.opacity ?? 1, '0x000000FF');
+  const subtitleStrokeColor = colorWithAlpha(subtitleStyle.strokeColor || '#000000', subtitleStyle.opacity ?? 1, '0x000000FF');
+  const titleShadowOffset = shadowOffsetsFromStyle(titleStyle);
+  const subtitleShadowOffset = shadowOffsetsFromStyle(subtitleStyle);
   const subtitleXExpr = `(w*${(subtitleX / 100).toFixed(4)})-(text_w/2)`;
-  const subtitleYExpr = `(h-text_h)*${(subtitleY / 100).toFixed(4)}`;
+  const subtitleYExpr = `(h*${(subtitleY / 100).toFixed(4)})-(text_h/2)`;
   const titleHoldSec = titleHold === 'always' ? null : Math.max(0.5, Number(titleHold) || 8);
 
   const drawBase = [
@@ -1727,6 +1808,7 @@ async function composeFinalVideo({
       const titleLines = titleText.split('\n').map((line) => line.trim()).filter(Boolean).slice(0, 2);
       const titleLineGap = Math.round(titleSize * 0.12);
       const titleBlockHeight = titleLines.length * titleSize + Math.max(0, titleLines.length - 1) * titleLineGap;
+      const titleBaseYExpr = `(h*${(titleY / 100).toFixed(4)})-(${titleBlockHeight}/2)`;
       for (let i = 0; i < titleLines.length; i += 1) {
         const titleTextPath = path.join(textTempDir, `title_${i}.txt`);
         await writeFile(titleTextPath, titleLines[i], 'utf8');
@@ -1734,13 +1816,15 @@ async function composeFinalVideo({
           `textfile='${escapeFilterPath(titleTextPath)}'`,
           `fontsize=${titleSize}`,
           `fontcolor=${titleColor}`,
-          'x=(w-text_w)/2',
-          `y=((h-${titleBlockHeight})*${(titleY / 100).toFixed(4)})+${i * (titleSize + titleLineGap)}`,
-          'shadowx=3',
-          'shadowy=3',
-          'shadowcolor=0x000000',
+          `x=(w*${(titleX / 100).toFixed(4)})-(text_w/2)`,
+          `y=${titleBaseYExpr}+${i * (titleSize + titleLineGap)}`,
+          `shadowx=${titleShadowOffset.x}`,
+          `shadowy=${titleShadowOffset.y}`,
+          `shadowcolor=${titleShadowColor}`,
+          `borderw=${Math.max(0, Number(titleStyle.strokeWidth || 0))}`,
+          `bordercolor=${titleStrokeColor}`,
         ];
-        if (fontPath) titleArgs.unshift(`fontfile='${escapeDrawText(fontPath)}'`);
+        if (titleFontPath) titleArgs.unshift(`fontfile='${escapeDrawText(titleFontPath)}'`);
         if (titleHoldSec) titleArgs.push(`enable='between(t,0,${titleHoldSec.toFixed(2)})'`);
         textFilters.push(`drawtext=${titleArgs.join(':')}`);
       }
@@ -1766,12 +1850,14 @@ async function composeFinalVideo({
         `fontcolor=${subtitleColor}`,
         `x=${subtitleXExpr}`,
         `y=${subtitleYExpr}`,
-        'shadowx=3',
-        'shadowy=3',
-        'shadowcolor=0x000000',
+        `shadowx=${subtitleShadowOffset.x}`,
+        `shadowy=${subtitleShadowOffset.y}`,
+        `shadowcolor=${subtitleShadowColor}`,
+        `borderw=${Math.max(0, Number(subtitleStyle.strokeWidth || 0))}`,
+        `bordercolor=${subtitleStrokeColor}`,
         `enable='between(t,${chunk.start.toFixed(2)},${chunk.end.toFixed(2)})'`,
       ];
-      if (fontPath) subtitleArgs.unshift(`fontfile='${escapeDrawText(fontPath)}'`);
+      if (subtitleFontPath) subtitleArgs.unshift(`fontfile='${escapeDrawText(subtitleFontPath)}'`);
       textFilters.push(`drawtext=${subtitleArgs.join(':')}`);
     }
 
@@ -1857,7 +1943,6 @@ async function composeFinalVideo({
     sourceMaterial: source.name,
     sourceMaterials: [source.name],
     sourceBase,
-    sourceBases: [sourceBase],
     duration: targetDuration,
     remainingDuration,
     remainderBucket,
@@ -2034,6 +2119,43 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && parsedUrl.pathname === '/api/generated/video-latest') {
+    try {
+      const itemNumber = String(parsedUrl.searchParams.get('itemNumber') || '').trim();
+      if (!itemNumber) throw new Error('itemNumber required');
+      const latest = await findLatestGeneratedVideoByItemNumber(itemNumber);
+      if (!latest) {
+        writeJson(res, 404, { ok: false, error: 'video not found' });
+        return;
+      }
+      writeJson(res, 200, { ok: true, ...latest });
+    } catch (error) {
+      writeJson(res, 400, { ok: false, error: error.message });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && parsedUrl.pathname === '/api/generated/video-status') {
+    try {
+      const itemNumber = String(parsedUrl.searchParams.get('itemNumber') || '').trim();
+      const videoUrl = String(parsedUrl.searchParams.get('videoUrl') || '').trim();
+      const outputPath = String(parsedUrl.searchParams.get('outputPath') || '').trim();
+      const latest = itemNumber ? await findLatestGeneratedVideoByItemNumber(itemNumber) : null;
+      const directPath = outputPath && existsSync(outputPath) ? outputPath : '';
+      const publicPath = videoUrl ? resolvePublicVideoPath(videoUrl) : '';
+      const publicExists = publicPath && existsSync(publicPath);
+      const latestExists = !!latest;
+      writeJson(res, 200, {
+        ok: true,
+        exists: Boolean(directPath || publicExists || latestExists),
+        latest: latest || null,
+      });
+    } catch (error) {
+      writeJson(res, 400, { ok: false, error: error.message });
+    }
+    return;
+  }
+
   if (req.method === 'POST' && parsedUrl.pathname === '/api/minimax/clone-voice') {
     try {
       const body = await readJsonBody(req);
@@ -2137,7 +2259,6 @@ const server = createServer(async (req, res) => {
       const text = String(body.text || '').trim();
       const language = String(body.language || 'yue').trim();
       const voiceId = String(body.voiceId || process.env.MINIMAX_VOICE_ID || '').trim();
-      const audioParams = body.audioParams && typeof body.audioParams === 'object' ? body.audioParams : {};
       const itemNumber = String(body.itemNumber || `audio_${Date.now()}`);
       if (!text) throw new Error('text required');
       if (!voiceId) throw new Error('voiceId required');
@@ -2156,9 +2277,9 @@ const server = createServer(async (req, res) => {
         english_normalization: language === 'english',
         voice_setting: {
           voice_id: voiceId,
-          speed: clampAudioParamValue('speed', audioParams.speed, 1),
-          vol: clampAudioParamValue('volume', audioParams.volume, 1),
-          pitch: clampAudioParamValue('pitch', audioParams.pitch, 0),
+          speed: 1,
+          vol: 1,
+          pitch: 0,
         },
         audio_setting: {
           sample_rate: Number.isFinite(sampleRate) ? sampleRate : 24000,
@@ -2166,11 +2287,6 @@ const server = createServer(async (req, res) => {
           format: audioFormat,
           channel: 1,
         },
-      };
-      ttsPayload.voice_modify = {
-        pitch: clampAudioParamValue('magnetic', audioParams.magnetic, 0),
-        intensity: clampAudioParamValue('intensity', audioParams.intensity, 0),
-        timbre: clampAudioParamValue('timbre', audioParams.timbre, 0),
       };
 
       const ttsResponse = await minimaxFetch(withGroupId(ttsEndpoint), {
@@ -2274,26 +2390,20 @@ const server = createServer(async (req, res) => {
       const usedSourceNames = new Set();
       const results = [];
       if (projectType !== 'kitchen') {
-        const availableUniqueBases = await countUniqueWaidanSourceBases();
-        if (availableUniqueBases < tasks.length) {
-          throw new Error(`可用独立素材源不足：本批需要 ${tasks.length} 个不同素材源，当前只有 ${availableUniqueBases} 个。请补素材后再试。`);
+        await runScan();
+        const inventory = await loadInventory();
+        const availablePool = [...(inventory?.unused?.files || []), ...(inventory?.fragments?.files || [])];
+        let requiredTotalDuration = 0;
+        for (const task of tasks) {
+          const audioUrl = String(task?.audioUrl || '');
+          if (!audioUrl) continue;
+          const audioPath = resolvePublicFile(audioUrl, '/generated_audio/');
+          const audioDuration = await getMediaDurationSeconds(audioPath).catch(() => 0);
+          requiredTotalDuration += Math.max(2, audioDuration + 0.2);
         }
-      } else {
-        const kitchenCounts = await countUniqueKitchenSourceBases(body.kitchenConfig || null);
-        const requiredPoolCount = tasks.length;
-        const shortages = [];
-        const poolLabels = {
-          outdoor: '外场',
-          aerial: '航拍',
-          warehouse: '仓库内部',
-        };
-        for (const [poolKey, count] of Object.entries(kitchenCounts)) {
-          if (count < requiredPoolCount) {
-            shortages.push(`${poolLabels[poolKey] || poolKey} ${count}/${requiredPoolCount}`);
-          }
-        }
-        if (shortages.length) {
-          throw new Error(`二手厨具素材源不足：${shortages.join('，')}。同一批里每条视频都必须使用不同源素材，请补足后再试。`);
+        const availableTotalDuration = availablePool.reduce((sum, file) => sum + Math.max(0, Number(file?.duration || 0)), 0);
+        if (availableTotalDuration > 0 && requiredTotalDuration > 0 && availableTotalDuration + 0.2 < requiredTotalDuration) {
+          throw new Error(`素材总时长不足：当前可用 ${availableTotalDuration.toFixed(1)}s，需要约 ${requiredTotalDuration.toFixed(1)}s`);
         }
       }
 
@@ -2314,17 +2424,13 @@ const server = createServer(async (req, res) => {
           exportDir,
           excludedMaterialNames: usedSourceNames,
         });
-      for (const materialName of (result.sourceMaterials || [])) {
-        if (materialName) usedSourceNames.add(materialName);
-      }
-      for (const sourceBase of (result.sourceBases || [])) {
-        if (sourceBase) usedSourceNames.add(sourceBase);
-      }
-      if (result.sourceMaterial) usedSourceNames.add(result.sourceMaterial);
-      if (result.sourceBase) usedSourceNames.add(result.sourceBase);
-      results.push({
-        taskId: String(task.id || ''),
-        ...result,
+        for (const materialName of (result.sourceMaterials || [])) {
+          if (materialName) usedSourceNames.add(materialName);
+        }
+        if (result.sourceMaterial) usedSourceNames.add(result.sourceMaterial);
+        results.push({
+          taskId: String(task.id || ''),
+          ...result,
         });
       }
 
